@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+generated_output/*
+!generated_output/.gitkeep
+*.json.tmp
+config.json
+destination_plate_state.json

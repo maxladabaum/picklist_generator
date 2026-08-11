@@ -1,0 +1,17 @@
+{
+  "destination_plate_name": "Destination[1]",
+  "max_destination_volume_uL": 12.5,
+  "output_root_path": "generated_output",
+  "pending_destination_wells": [
+    "A01",
+    "A02",
+    "A03"
+  ],
+  "recent_destination_wells": [],
+  "save_picklist_path": "generated_output/picklist_combined.csv",
+  "save_recipe_path": "generated_output/mixing_recipe.csv",
+  "source_plate_type": "384PP_AQ_BP",
+  "transfer_volume_nL": 50,
+  "transfers_per_source": 1,
+  "version": 1
+}
