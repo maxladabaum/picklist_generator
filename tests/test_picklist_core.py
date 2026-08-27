@@ -30,10 +30,39 @@ class PicklistCoreTests(unittest.TestCase):
         self.assertGreater(len(base), 250)
         for filename in (
             "yaritza_replace.csv", "samuel_replace.csv", "max_replace.csv",
-            "max_replace_MB.csv", "PAINT_replace.csv",
+            "max_replace_MB.csv", "PAINT_replace.csv", "PAINT_R1_replace.csv",
         ):
             rows, _ = parse_source2(SHEETS / filename)
             self.assertTrue(rows, filename)
+
+    def test_paint_r1_row_15_uses_its_distinct_replacement_scheme(self):
+        base, _ = parse_source1(SHEETS / "book_base.csv")
+        rows = generate_picklist(
+            SHEETS / "book_base.csv",
+            [
+                ReplacementSelection(
+                    SHEETS / "PAINT_R1_replace.csv",
+                    ["U-Apt_H15-01_R1"],
+                    "SourcePlate6[6]",
+                )
+            ],
+            ["A01", "A02"],
+        )
+        self.assertEqual(len(rows), len(base))
+        self.assertTrue(
+            any(
+                row["Source Plate Name"] == "SourcePlate6[6]"
+                and row["Source Well"] == "O2"
+                for row in rows
+            )
+        )
+        self.assertFalse(
+            any(
+                row["Source Plate Name"] == "SourcePlate1[1]"
+                and row["Source Well"] == "H09"
+                for row in rows
+            )
+        )
 
     def test_replacement_preserves_active_source_count(self):
         base, _ = parse_source1(SHEETS / "book_base.csv")

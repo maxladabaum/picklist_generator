@@ -129,7 +129,7 @@ class SetView:
         self.panel_picker.bind("<<ComboboxSelected>>", lambda _event: self._show_panel())
         self.selection_summary = tk.StringVar(value="0 selected in this set")
         ttk.Label(panel_bar, textvariable=self.selection_summary, foreground="#555555").pack(side="left")
-        if self.title in {"Set C", "Set D", "Set E"}:
+        if self.title in {"Aptamers", "MB", "PAINT P1", "PAINT R1"}:
             legend = tk.Frame(scroll.inner, background="#f0f0f0")
             legend.pack(fill="x", padx=12, pady=(4, 2))
             self._legend_square(legend, self.SELECTABLE_BG, "").pack(side="left")
@@ -163,14 +163,13 @@ class SetView:
             ttk.Label(self.panel_host, text="Cannot read sheet: {}".format(exc), foreground="#a40000").pack()
             return
         for panel in self.panels:
-            label = str(panel["label"])
             active = panel.get("active")
             for row in panel["rows"]:
                 for column in panel["columns"]:
                     position = (str(row), str(column))
                     if active is not None and position not in active:
                         continue
-                    name = "{}_{}-{}".format(label, row, column)
+                    name = panel_sequence_name(panel, row, column)
                     self.variables[name] = tk.BooleanVar(value=False)
                     self.selectable[name] = name in self.available
         self._show_panel()
@@ -204,7 +203,7 @@ class SetView:
             ttk.Label(frame, text=str(row), width=6, anchor="e").grid(row=grid_row, column=0, padx=(4, 8))
             for ci, column in enumerate(columns, 1):
                 position = (str(row), str(column))
-                name = "{}_{}-{}".format(label, row, column)
+                name = panel_sequence_name(panel, row, column)
                 configured = active is None or position in active
                 exists = name in available
                 is_selectable = configured and exists
@@ -323,8 +322,27 @@ class SetView:
             self.selection_changed()
 
 
-def dense_panel(label: str, active: Optional[Set[Tuple[str, str]]] = None, colors=None) -> Dict[str, object]:
-    return {"label": label, "rows": ROWS, "columns": COLS, "active": active, "colors": colors or {}}
+def panel_sequence_name(panel: Dict[str, object], row: object, column: object) -> str:
+    template = str(panel.get("name_template", "{label}_{row}-{column}"))
+    return template.format(label=panel["label"], row=row, column=column)
+
+
+def dense_panel(
+    label: str,
+    active: Optional[Set[Tuple[str, str]]] = None,
+    colors=None,
+    name_template: Optional[str] = None,
+) -> Dict[str, object]:
+    panel: Dict[str, object] = {
+        "label": label,
+        "rows": ROWS,
+        "columns": COLS,
+        "active": active,
+        "colors": colors or {},
+    }
+    if name_template is not None:
+        panel["name_template"] = name_template
+    return panel
 
 
 def panel_definitions() -> List[Tuple[str, str, str, List[Dict[str, object]]]]:
@@ -343,6 +361,11 @@ def panel_definitions() -> List[Tuple[str, str, str, List[Dict[str, object]]]]:
     for ri, row in enumerate(ROWS):
         for ci, column in enumerate(COLS):
             colors[(row, column)] = palette[(ci - ri) % 3]
+    paint_r1_colors = {
+        (row, column): "cyan"
+        for row in ROWS
+        for column in COLS
+    }
     left = {("Top", "L3"), ("Mid", "L3"), ("Bot", "L3"), ("Mid", "L2"), ("Mid", "L1")}
     right = {("Top", "R3"), ("Mid", "R3"), ("Bot", "R3"), ("Mid", "R2"), ("Mid", "R1")}
     c_panels = []
@@ -351,10 +374,16 @@ def panel_definitions() -> List[Tuple[str, str, str, List[Dict[str, object]]]]:
     for label in ("PDGF-14", "PDGF-18", "PDGF-22", "PDGF-26", "PDGF-30", "PDGF-34", "PDGF-38", "Kana-14", "Kana-18", "Kana-22"):
         c_panels.append({"label": label, "rows": ["Top", "Mid", "Bot"], "columns": ["L3", "L2", "L1", "R1", "R2", "R3"], "active": right})
     return [
-        ("Set A", "yaritza_replace.csv", "SourcePlate3[3]", [dense_panel("D-Apt"), dense_panel("U-Apt")]),
-        ("Set C", "max_replace.csv", "SourcePlate4[4]", c_panels),
-        ("Set D", "max_replace_MB.csv", "SourcePlate4[4]", [dense_panel("D-MB", set_d), dense_panel("U-MB", set_u)]),
-        ("Set E", "PAINT_replace.csv", "SourcePlate5[5]", [dense_panel("D-Biotin", set_e), dense_panel("U-PAINT", colors=colors)]),
+        ("Yaritza Extensions", "yaritza_replace.csv", "SourcePlate3[3]", [dense_panel("D-Apt"), dense_panel("U-Apt")]),
+        ("Aptamers", "max_replace.csv", "SourcePlate4[4]", c_panels),
+        ("MB", "max_replace_MB.csv", "SourcePlate4[4]", [dense_panel("D-MB", set_d), dense_panel("U-MB", set_u)]),
+        ("PAINT P1", "PAINT_replace.csv", "SourcePlate5[5]", [dense_panel("D-Biotin", set_e), dense_panel("U-PAINT", colors=colors)]),
+        (
+            "PAINT R1",
+            "PAINT_R1_replace.csv",
+            "SourcePlate6[6]",
+            [dense_panel("U-Apt R1", colors=paint_r1_colors, name_template="U-Apt_{row}-{column}_R1")],
+        ),
     ]
 
 

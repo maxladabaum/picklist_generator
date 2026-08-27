@@ -1,8 +1,9 @@
 # Echo Picklist Generator
 
 A standalone desktop version of the GUI and picklist workflow from
-`picklist_generator_replacement-Copy1.ipynb`. Sets A, C, D, and E and the base
-source sheet are loaded automatically with portable, relative paths. The
+`picklist_generator_replacement-Copy1.ipynb`. Yaritza Extensions, Aptamers,
+MB, PAINT P1, PAINT R1, and the base source sheet are loaded
+automatically with portable, relative paths. The
 original Set B CSV remains archived in `replacement_sheets/` but is not loaded
 or shown by the application.
 
@@ -53,8 +54,9 @@ plate after confirmation. Existing output folders are retained.
 
 ## Workflow
 
-1. Open **Replacements** and select wells in Sets A, C, D, or E. Grey wells do not have a
-   corresponding row in the selected replacement CSV.
+1. Open **Replacements** and select wells in Yaritza Extensions, Aptamers, MB,
+   PAINT P1, or PAINT R1. Grey wells do not have a corresponding
+   row in the selected replacement CSV.
 2. Click **Check selections** at the bottom of the Replacements tab. Any
    selections targeting the same base well turn red with an × and are listed
    in the compatibility box.
