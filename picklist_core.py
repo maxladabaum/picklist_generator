@@ -269,6 +269,61 @@ def calculate_mixing_volumes(
     return [{"Reagent": label, "Volume_uL": value} for label, value in zip(labels, values)]
 
 
+def combine_picklists(
+    picklists: Sequence[Sequence[Dict[str, object]]],
+) -> List[Dict[str, object]]:
+    """Combine stored picklists while preventing two designs from sharing a destination well."""
+    if not picklists:
+        raise ValueError("Select at least one stored picklist.")
+
+    combined: List[Dict[str, object]] = []
+    occupied_by: Dict[Tuple[str, str], int] = {}
+    for picklist_index, rows in enumerate(picklists, 1):
+        if not rows:
+            raise ValueError("Stored picklist {} contains no transfers.".format(picklist_index))
+        occupied = {
+            (_clean(row.get("Destination Plate Name")), _clean(row.get("Destination Well")).upper())
+            for row in rows
+        }
+        for destination in occupied:
+            if destination in occupied_by:
+                raise ValueError(
+                    "Stored picklists {} and {} both use destination {} / {}.".format(
+                        occupied_by[destination], picklist_index, destination[0], destination[1]
+                    )
+                )
+            occupied_by[destination] = picklist_index
+        combined.extend(dict(row) for row in rows)
+    return combined
+
+
+def combine_mixing_recipes(
+    recipes: Sequence[Sequence[Dict[str, object]]],
+) -> List[Dict[str, float]]:
+    """Sum matching reagent volumes across multiple stored mixing recipes."""
+    if not recipes:
+        raise ValueError("Select at least one stored mixing recipe.")
+
+    reagent_order: List[str] = []
+    totals: Dict[str, float] = {}
+    for recipe_index, rows in enumerate(recipes, 1):
+        if not rows:
+            raise ValueError("Stored mixing recipe {} contains no rows.".format(recipe_index))
+        for row in rows:
+            reagent = _clean(row.get("Reagent"))
+            if not reagent:
+                raise ValueError("Stored mixing recipe {} has a row without a reagent name.".format(recipe_index))
+            try:
+                volume = float(row.get("Volume_uL", 0))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Stored volume for '{}' is not numeric.".format(reagent)) from exc
+            if reagent not in totals:
+                reagent_order.append(reagent)
+                totals[reagent] = 0.0
+            totals[reagent] += volume
+    return [{"Reagent": reagent, "Volume_uL": totals[reagent]} for reagent in reagent_order]
+
+
 def write_csv(path: Path, rows: Sequence[Dict[str, object]], columns: Sequence[str]) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

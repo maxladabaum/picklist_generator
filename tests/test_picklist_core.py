@@ -14,10 +14,13 @@ from app_state import (
 from picklist_core import (
     ReplacementSelection,
     calculate_mixing_volumes,
+    combine_mixing_recipes,
+    combine_picklists,
     generate_picklist,
     parse_source1,
     parse_source2,
 )
+from selection_report import write_replacement_selection_pdf, write_stored_runs_selection_pdf
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -89,6 +92,62 @@ class PicklistCoreTests(unittest.TestCase):
             [0, 0, 0, 100], [0, 10, 0, 0], [500, 10, 1, 1, 12, 5],
         )
         self.assertAlmostEqual(sum(row["Volume_uL"] for row in recipe), 500.0)
+
+    def test_stored_picklists_and_recipes_combine(self):
+        first = [{"Destination Plate Name": "Destination[1]", "Destination Well": "A01", "Transfer Volume": 50}]
+        second = [{"Destination Plate Name": "Destination[1]", "Destination Well": "A02", "Transfer Volume": 50}]
+        self.assertEqual(combine_picklists([first, second]), first + second)
+        recipe = combine_mixing_recipes([
+            [{"Reagent": "Staple", "Volume_uL": 1.25}, {"Reagent": "Water", "Volume_uL": 8.75}],
+            [{"Reagent": "Staple", "Volume_uL": 2.5}, {"Reagent": "Water", "Volume_uL": 17.5}],
+        ])
+        self.assertEqual(recipe, [
+            {"Reagent": "Staple", "Volume_uL": 3.75},
+            {"Reagent": "Water", "Volume_uL": 26.25},
+        ])
+
+    def test_combining_picklists_rejects_overlapping_destination_wells(self):
+        row = {"Destination Plate Name": "Destination[1]", "Destination Well": "A01", "Transfer Volume": 50}
+        with self.assertRaisesRegex(ValueError, "both use destination"):
+            combine_picklists([[row], [dict(row)]])
+
+    def test_replacement_selection_pdf_contains_used_panels(self):
+        panels = [{
+            "group": "Aptamers",
+            "label": "PDGF & Apt",
+            "rows": ["Top", "Mid"],
+            "columns": ["L3", "R3"],
+            "active": [("Top", "L3"), ("Top", "R3"), ("Mid", "L3"), ("Mid", "R3")],
+            "selected": [("Top", "R3")],
+            "selected_names": ["PDGF-14_Top-R3"],
+        }]
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder) / "selections.pdf"
+            write_replacement_selection_pdf(output, panels, datetime(2026, 8, 27, 16, 30, 0))
+            data = output.read_bytes()
+            self.assertTrue(data.startswith(b"%PDF-1.4"))
+            self.assertTrue(data.endswith(b"%%EOF\n"))
+            self.assertIn(b"PDGF & Apt", data)
+            self.assertIn(b"PDGF-14_Top-R3", data)
+
+    def test_stored_run_selection_pdf_separates_runs(self):
+        panel = {
+            "group": "Aptamers", "label": "PDGF-14",
+            "rows": ["Top"], "columns": ["R3"],
+            "active": [("Top", "R3")], "selected": [("Top", "R3")],
+            "selected_names": ["PDGF-14_Top-R3"],
+        }
+        runs = [
+            {"run_name": "Design alpha", "panels": [panel]},
+            {"run_name": "Design beta", "panels": [panel]},
+        ]
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder) / "stored-runs.pdf"
+            write_stored_runs_selection_pdf(output, runs, datetime(2026, 8, 27, 16, 30, 0))
+            data = output.read_bytes()
+            self.assertIn(b"/Count 2", data)
+            self.assertIn(b"Run: Design alpha", data)
+            self.assertIn(b"Run: Design beta", data)
 
     def test_destination_state_records_usage_and_skips_used_wells(self):
         state = {"version": 1, "plates": {}}

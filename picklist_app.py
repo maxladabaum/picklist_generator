@@ -7,9 +7,11 @@ import subprocess
 import sys
 import tkinter as tk
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Dict, List, Optional, Sequence, Set, Tuple
+from uuid import uuid4
 
 from app_state import (
     PLATE_ROWS,
@@ -28,6 +30,8 @@ from picklist_core import (
     PICKLIST_COLUMNS,
     ReplacementSelection,
     calculate_mixing_volumes,
+    combine_mixing_recipes,
+    combine_picklists,
     generate_picklist,
     parse_vector,
     parse_source2,
@@ -35,6 +39,7 @@ from picklist_core import (
     valid_well_list,
     write_csv,
 )
+from selection_report import write_replacement_selection_pdf, write_stored_runs_selection_pdf
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -42,8 +47,10 @@ SHEET_DIR = APP_DIR / "replacement_sheets"
 OUTPUT_DIR = APP_DIR / "generated_output"
 CONFIG_PATH = APP_DIR / "config.json"
 PLATE_STATE_PATH = APP_DIR / "destination_plate_state.json"
+STORAGE_STATE_PATH = APP_DIR / "storage_state.json"
 CONFIG_EXAMPLE_PATH = APP_DIR / "config.example.json"
 PLATE_STATE_EXAMPLE_PATH = APP_DIR / "destination_plate_state.example.json"
+STORAGE_STATE_EXAMPLE_PATH = APP_DIR / "storage_state.example.json"
 
 DEFAULT_CONFIG = {
     "version": 1,
@@ -59,6 +66,7 @@ DEFAULT_CONFIG = {
     "max_destination_volume_uL": 12.5,
 }
 DEFAULT_PLATE_STATE = {"version": 1, "plates": {}}
+DEFAULT_STORAGE_STATE = {"version": 2, "items": []}
 
 ROWS = ["H01", "H03", "H05", "H07", "H09", "H11", "H13", "H15"]
 COLS = ["{:02d}".format(i) for i in range(1, 13)]
@@ -506,12 +514,16 @@ class PicklistApp(tk.Tk):
         super().__init__()
         config_defaults = load_json(CONFIG_EXAMPLE_PATH, DEFAULT_CONFIG)
         plate_defaults = load_json(PLATE_STATE_EXAMPLE_PATH, DEFAULT_PLATE_STATE)
+        storage_defaults = load_json(STORAGE_STATE_EXAMPLE_PATH, DEFAULT_STORAGE_STATE)
         self.config = load_json(CONFIG_PATH, config_defaults)
         self.plate_state = load_json(PLATE_STATE_PATH, plate_defaults)
+        self.storage_state = load_json(STORAGE_STATE_PATH, storage_defaults)
         if not CONFIG_PATH.exists():
             save_json(CONFIG_PATH, self.config)
         if not PLATE_STATE_PATH.exists():
             save_json(PLATE_STATE_PATH, self.plate_state)
+        if not STORAGE_STATE_PATH.exists():
+            save_json(STORAGE_STATE_PATH, self.storage_state)
         self._config_save_job = None
         self.title("Echo Picklist Generator")
         self.geometry("1280x880")
@@ -520,6 +532,8 @@ class PicklistApp(tk.Tk):
         self.set_views: List[SetView] = []
         self.last_picklist: List[Dict[str, object]] = []
         self.last_mix: List[Dict[str, float]] = []
+        self.last_design_names: List[str] = []
+        self.last_selection_panels: List[Dict[str, object]] = []
         self._build()
 
     def _set_style(self) -> None:
@@ -539,11 +553,13 @@ class PicklistApp(tk.Tk):
         replacement_page = ttk.Frame(main_tabs)
         settings_page = ttk.Frame(main_tabs)
         plate_page = ttk.Frame(main_tabs)
+        storage_page = ttk.Frame(main_tabs)
         preview_page = ttk.Frame(main_tabs)
         main_tabs.add(replacement_page, text="1. Replacements")
         main_tabs.add(settings_page, text="2. Run & Mixing Settings")
         main_tabs.add(plate_page, text="3. Destination Plate")
-        main_tabs.add(preview_page, text="4. Results")
+        main_tabs.add(storage_page, text="4. Storage")
+        main_tabs.add(preview_page, text="5. Results")
         self.main_tabs = main_tabs
         self.replacement_page = replacement_page
 
@@ -574,6 +590,7 @@ class PicklistApp(tk.Tk):
         ).pack(side="left", padx=12)
         self.plate_view = DestinationPlateView(plate_page)
         self.plate_view.pack(fill="both", expand=True)
+        self._build_storage(storage_page)
         self._build_preview(preview_page)
         self._bind_config_updates()
         self._refresh_plate_view()
@@ -585,6 +602,12 @@ class PicklistApp(tk.Tk):
         top = ttk.Frame(footer)
         top.pack(fill="x")
         ttk.Button(top, text="Check selections", command=self.check_selections).pack(side="left")
+        ttk.Button(top, text="Clear all selections", command=self.clear_all_selections).pack(
+            side="left", padx=(8, 0)
+        )
+        ttk.Button(top, text="Save selections PDF", command=self.save_selections_pdf).pack(
+            side="left", padx=(8, 0)
+        )
         self.compatibility_status = tk.Label(
             top,
             text="Not checked",
@@ -603,6 +626,84 @@ class PicklistApp(tk.Tk):
         )
         self.clash_text.pack(fill="x", pady=(6, 0))
         self._set_clash_text("Select replacement wells, then click Check selections.")
+
+    def clear_all_selections(self) -> None:
+        """Restore every replacement set and compatibility indicator to its initial state."""
+        for view in self.set_views:
+            view.clear()
+        self.compatibility_status.configure(text="Not checked", foreground="#555555")
+        self._set_clash_text("Select replacement wells, then click Check selections.")
+
+    def _replacement_selection_panels(
+        self, selected_names: Optional[Set[str]] = None
+    ) -> List[Dict[str, object]]:
+        """Describe selected positions across every replacement panel."""
+        panels = []
+        for view in self.set_views:
+            names_for_view = set(view.selected()) if selected_names is None else selected_names
+            if not names_for_view:
+                continue
+            for panel in view.panels:
+                rows = [str(value) for value in panel["rows"]]
+                columns = [str(value) for value in panel["columns"]]
+                configured = panel.get("active")
+                active = {
+                    (row, column)
+                    for row in rows
+                    for column in columns
+                    if configured is None or (row, column) in configured
+                }
+                selected = []
+                names = []
+                for row in rows:
+                    for column in columns:
+                        name = panel_sequence_name(panel, row, column)
+                        if name in names_for_view:
+                            selected.append((row, column))
+                            names.append(name)
+                if selected:
+                    panels.append(
+                        {
+                            "group": view.title,
+                            "label": str(panel["label"]),
+                            "rows": rows,
+                            "columns": columns,
+                            "active": sorted(active),
+                            "selected": selected,
+                            "selected_names": names,
+                        }
+                    )
+        return panels
+
+    def save_selections_pdf(self) -> None:
+        """Export selected replacements from every panel as one PDF report."""
+        panels = self._replacement_selection_panels()
+        if not panels:
+            messagebox.showinfo(
+                "No replacements selected",
+                "Select at least one replacement before saving a PDF.",
+                parent=self,
+            )
+            return
+
+        try:
+            output_root = Path(self.output_root.get()).expanduser()
+            if not output_root.is_absolute():
+                output_root = APP_DIR / output_root
+            run_directory = create_run_output_directory(output_root)
+            path = run_directory / "replacement_selections.pdf"
+            write_replacement_selection_pdf(path, panels)
+            messagebox.showinfo(
+                "Selections PDF saved",
+                "Saved a PDF of {} selected replacement{} to:\n{}".format(
+                    sum(len(panel["selected_names"]) for panel in panels),
+                    "" if sum(len(panel["selected_names"]) for panel in panels) == 1 else "s",
+                    path,
+                ),
+                parent=self,
+            )
+        except Exception as exc:
+            messagebox.showerror("Could not save selections PDF", str(exc), parent=self)
 
     def _set_clash_text(self, text: str) -> None:
         self.clash_text.configure(state="normal")
@@ -841,8 +942,15 @@ class PicklistApp(tk.Tk):
         ttk.Label(action, textvariable=self.status).pack(side="left", padx=10)
 
     def _build_preview(self, page: ttk.Frame) -> None:
+        top = ttk.Frame(page, padding=10)
+        top.pack(fill="x")
         self.summary = tk.StringVar(value="Generate a run to see results.")
-        ttk.Label(page, textvariable=self.summary, padding=10).pack(fill="x")
+        ttk.Label(top, textvariable=self.summary).pack(side="left", fill="x", expand=True)
+        self.add_storage_button = ttk.Button(
+            top, text="Add latest run to storage", command=self._add_latest_to_storage
+        )
+        self.add_storage_button.pack(side="right")
+        self.add_storage_button.configure(state="disabled")
         notebook = ttk.Notebook(page)
         notebook.pack(fill="both", expand=True, padx=10, pady=5)
         pick_page, mix_page = ttk.Frame(notebook), ttk.Frame(notebook)
@@ -850,6 +958,288 @@ class PicklistApp(tk.Tk):
         notebook.add(mix_page, text="Mixing recipe")
         self.pick_tree = self._tree(pick_page, PICKLIST_COLUMNS)
         self.mix_tree = self._tree(mix_page, ("Reagent", "Volume_uL"))
+
+    def _build_storage(self, page: ttk.Frame) -> None:
+        top = ttk.Frame(page, padding=(12, 10))
+        top.pack(fill="x")
+        ttk.Label(
+            top,
+            text="Stored runs remain available after restarting. Select rows to combine CSVs or export selections.",
+        ).pack(side="left", fill="x", expand=True)
+        ttk.Button(top, text="Add latest run", command=self._add_latest_to_storage).pack(side="right")
+
+        actions = ttk.Frame(page, padding=(12, 0, 12, 8))
+        actions.pack(fill="x")
+        ttk.Button(actions, text="Select all", command=self._select_all_storage).pack(side="left")
+        ttk.Button(
+            actions,
+            text="Clear selection",
+            command=lambda: self.storage_tree.selection_remove(self.storage_tree.selection()),
+        ).pack(side="left", padx=6)
+        ttk.Button(actions, text="Remove selected", command=self._remove_selected_storage).pack(
+            side="left", padx=(12, 6)
+        )
+        ttk.Button(
+            actions,
+            text="Generate selections PDF",
+            command=self._generate_storage_selections_pdf,
+        ).pack(side="right", padx=(6, 0))
+        ttk.Button(
+            actions,
+            text="Generate combined picklist + recipe",
+            style="Generate.TButton",
+            command=self._generate_combined_storage,
+        ).pack(side="right")
+
+        tree_frame = ttk.Frame(page, padding=(12, 0, 12, 6))
+        tree_frame.pack(fill="both", expand=True)
+        columns = ("Created", "Run name", "Replacements", "Destination plate", "Destination wells", "Transfers")
+        self.storage_tree = ttk.Treeview(
+            tree_frame, columns=columns, show="headings", selectmode="extended"
+        )
+        widths = (145, 190, 270, 140, 180, 80)
+        for column, width in zip(columns, widths):
+            self.storage_tree.heading(column, text=column)
+            self.storage_tree.column(column, width=width, stretch=True)
+        ybar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.storage_tree.yview)
+        xbar = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.storage_tree.xview)
+        self.storage_tree.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
+        self.storage_tree.grid(row=0, column=0, sticky="nsew")
+        ybar.grid(row=0, column=1, sticky="ns")
+        xbar.grid(row=1, column=0, sticky="ew")
+        tree_frame.rowconfigure(0, weight=1)
+        tree_frame.columnconfigure(0, weight=1)
+        self.storage_status = tk.StringVar()
+        ttk.Label(page, textvariable=self.storage_status, padding=(12, 4, 12, 10)).pack(fill="x")
+        self.storage_tree.bind("<<TreeviewSelect>>", lambda _event: self._update_storage_status())
+        self._refresh_storage_tree()
+
+    def _storage_items(self) -> List[Dict[str, object]]:
+        items = self.storage_state.setdefault("items", [])
+        if not isinstance(items, list):
+            items = []
+            self.storage_state["items"] = items
+        return items
+
+    def _refresh_storage_tree(self) -> None:
+        if not hasattr(self, "storage_tree"):
+            return
+        selected = set(self.storage_tree.selection())
+        self.storage_tree.delete(*self.storage_tree.get_children())
+        for item_index, item in enumerate(self._storage_items(), 1):
+            item_id = str(item.get("id", ""))
+            if not item_id:
+                continue
+            names = item.get("design_names", [])
+            design = ", ".join(str(name) for name in names) if isinstance(names, list) else str(names)
+            run_name = str(item.get("run_name", "")).strip() or "Stored run {}".format(item_index)
+            wells = item.get("destination_wells", [])
+            well_text = ",".join(str(well) for well in wells) if isinstance(wells, list) else str(wells)
+            created = str(item.get("created_utc", "")).replace("T", " ")[:19]
+            self.storage_tree.insert(
+                "",
+                "end",
+                iid=item_id,
+                values=(
+                    created,
+                    run_name,
+                    design,
+                    item.get("destination_plate_name", ""),
+                    well_text,
+                    item.get("transfer_count", 0),
+                ),
+            )
+        existing = [item_id for item_id in selected if self.storage_tree.exists(item_id)]
+        if existing:
+            self.storage_tree.selection_set(existing)
+        self._update_storage_status()
+
+    def _update_storage_status(self) -> None:
+        count = len(self._storage_items())
+        selected = len(self.storage_tree.selection()) if hasattr(self, "storage_tree") else 0
+        self.storage_status.set(
+            "{} stored run{} • {} selected".format(count, "" if count == 1 else "s", selected)
+        )
+
+    def _select_all_storage(self) -> None:
+        children = self.storage_tree.get_children()
+        if children:
+            self.storage_tree.selection_set(children)
+
+    def _add_latest_to_storage(self) -> None:
+        if not self.last_picklist or not self.last_mix:
+            messagebox.showinfo(
+                "Nothing to store", "Generate a picklist and mixing recipe first.", parent=self
+            )
+            return
+        source_path = self._portable_path(self.picklist_path.get())
+        if any(item.get("source_picklist_path") == source_path for item in self._storage_items()):
+            messagebox.showinfo(
+                "Already stored", "The latest generated run is already in storage.", parent=self
+            )
+            return
+        destination_wells = list(
+            dict.fromkeys(str(row["Destination Well"]) for row in self.last_picklist)
+        )
+        destination_plate = str(self.last_picklist[0].get("Destination Plate Name", ""))
+        suggested_name = "{} {}".format(destination_plate, ",".join(destination_wells))
+        run_name = simpledialog.askstring(
+            "Name stored run",
+            "Enter a name for this picklist run:",
+            initialvalue=suggested_name,
+            parent=self,
+        )
+        if run_name is None:
+            return
+        run_name = run_name.strip()
+        if not run_name:
+            messagebox.showerror("Run name required", "Enter a name for the stored run.", parent=self)
+            return
+        selection_panels = self.last_selection_panels or self._replacement_selection_panels(
+            set(self.last_design_names)
+        )
+        if not selection_panels:
+            messagebox.showerror(
+                "Missing selection metadata",
+                "The latest run's replacement selections could not be captured. Generate the run again.",
+                parent=self,
+            )
+            return
+        item = {
+            "id": uuid4().hex,
+            "created_utc": datetime.now(timezone.utc).isoformat(),
+            "run_name": run_name,
+            "design_names": list(self.last_design_names),
+            "selection_panels": [dict(panel) for panel in selection_panels],
+            "destination_plate_name": destination_plate,
+            "destination_wells": destination_wells,
+            "transfer_count": len(self.last_picklist),
+            "source_picklist_path": source_path,
+            "source_recipe_path": self._portable_path(self.mix_path.get()),
+            "picklist": [dict(row) for row in self.last_picklist],
+            "mixing_recipe": [dict(row) for row in self.last_mix],
+        }
+        self._storage_items().append(item)
+        self.storage_state["version"] = 2
+        self.storage_state["updated_utc"] = item["created_utc"]
+        save_json(STORAGE_STATE_PATH, self.storage_state)
+        self._refresh_storage_tree()
+        self.storage_tree.selection_set(str(item["id"]))
+        self.status.set("'{}' added to storage".format(run_name))
+
+    def _selected_storage_items(self) -> List[Dict[str, object]]:
+        selected = set(self.storage_tree.selection())
+        return [item for item in self._storage_items() if str(item.get("id", "")) in selected]
+
+    def _remove_selected_storage(self) -> None:
+        selected = self._selected_storage_items()
+        if not selected:
+            messagebox.showinfo(
+                "Nothing selected", "Select one or more stored runs to remove.", parent=self
+            )
+            return
+        if not messagebox.askyesno(
+            "Remove stored runs",
+            "Remove {} selected run{} from storage? Generated CSV files will not be deleted.".format(
+                len(selected), "" if len(selected) == 1 else "s"
+            ),
+            icon="warning",
+            parent=self,
+        ):
+            return
+        selected_ids = {str(item.get("id", "")) for item in selected}
+        self.storage_state["items"] = [
+            item for item in self._storage_items() if str(item.get("id", "")) not in selected_ids
+        ]
+        self.storage_state["updated_utc"] = datetime.now(timezone.utc).isoformat()
+        save_json(STORAGE_STATE_PATH, self.storage_state)
+        self._refresh_storage_tree()
+
+    def _generate_storage_selections_pdf(self) -> None:
+        selected = self._selected_storage_items()
+        if not selected:
+            messagebox.showinfo(
+                "Nothing selected", "Select one or more stored runs, or click Select all.", parent=self
+            )
+            return
+        runs = []
+        upgraded = False
+        for item_index, item in enumerate(selected, 1):
+            panels = item.get("selection_panels", [])
+            if not isinstance(panels, list) or not panels:
+                names = item.get("design_names", [])
+                name_set = {str(name) for name in names} if isinstance(names, list) else set()
+                panels = self._replacement_selection_panels(name_set)
+                if panels:
+                    item["selection_panels"] = panels
+                    upgraded = True
+            run_name = str(item.get("run_name", "")).strip() or "Stored run {}".format(item_index)
+            if not panels:
+                messagebox.showerror(
+                    "Missing selection metadata",
+                    "Cannot reconstruct replacement selections for '{}'. Regenerate and store that run again.".format(
+                        run_name
+                    ),
+                    parent=self,
+                )
+                return
+            runs.append({"run_name": run_name, "panels": panels})
+        if upgraded:
+            self.storage_state["version"] = 2
+            self.storage_state["updated_utc"] = datetime.now(timezone.utc).isoformat()
+            save_json(STORAGE_STATE_PATH, self.storage_state)
+
+        try:
+            output_root = Path(self.output_root.get()).expanduser()
+            if not output_root.is_absolute():
+                output_root = APP_DIR / output_root
+            run_directory = create_run_output_directory(output_root)
+            path = run_directory / "stored_run_selections.pdf"
+            write_stored_runs_selection_pdf(path, runs)
+            messagebox.showinfo(
+                "Stored run selections PDF saved",
+                "Saved selections for {} run{} to:\n{}".format(
+                    len(runs), "" if len(runs) == 1 else "s", path
+                ),
+                parent=self,
+            )
+        except Exception as exc:
+            messagebox.showerror("Could not save stored run selections PDF", str(exc), parent=self)
+
+    def _generate_combined_storage(self) -> None:
+        selected = self._selected_storage_items()
+        if not selected:
+            messagebox.showinfo(
+                "Nothing selected", "Select one or more stored runs, or click Select all.", parent=self
+            )
+            return
+        try:
+            picklists = [item.get("picklist", []) for item in selected]
+            recipes = [item.get("mixing_recipe", []) for item in selected]
+            combined_picklist = combine_picklists(picklists)  # type: ignore[arg-type]
+            combined_recipe = combine_mixing_recipes(recipes)  # type: ignore[arg-type]
+            output_root = Path(self.output_root.get()).expanduser()
+            if not output_root.is_absolute():
+                output_root = APP_DIR / output_root
+            run_directory = create_run_output_directory(output_root)
+            picklist_output = run_directory / "picklist_combined.csv"
+            recipe_output = run_directory / "mixing_recipe_combined.csv"
+            write_csv(picklist_output, combined_picklist, PICKLIST_COLUMNS)
+            write_csv(recipe_output, combined_recipe, ("Reagent", "Volume_uL"))
+            self.storage_status.set(
+                "Combined {} runs into {} transfers; files saved in {}".format(
+                    len(selected), len(combined_picklist), run_directory.name
+                )
+            )
+            messagebox.showinfo(
+                "Combined files generated",
+                "Saved picklist_combined.csv and mixing_recipe_combined.csv in:\n{}".format(
+                    run_directory
+                ),
+                parent=self,
+            )
+        except Exception as exc:
+            messagebox.showerror("Could not combine stored runs", str(exc), parent=self)
 
     def _tree(self, parent: tk.Widget, columns: Sequence[str]) -> ttk.Treeview:
         frame = ttk.Frame(parent)
@@ -875,10 +1265,12 @@ class PicklistApp(tk.Tk):
                 tabs.select(self.replacement_page)
                 return
             selections = []
+            design_names = []
             for view in self.set_views:
                 names = view.selected()
                 if names:
                     selections.append(ReplacementSelection(Path(view.path_var.get()), names, view.plate_name))
+                    design_names.extend(names)
             if not selections:
                 raise ValueError("Select at least one replacement.")
             transfer_volume = int(self.transfer_volume.get())
@@ -936,6 +1328,9 @@ class PicklistApp(tk.Tk):
             }
             self._flush_config()
             self.last_picklist, self.last_mix = picklist, mixing
+            self.last_design_names = design_names
+            self.last_selection_panels = self._replacement_selection_panels()
+            self.add_storage_button.configure(state="normal")
             self._fill_tree(self.pick_tree, picklist[:500], PICKLIST_COLUMNS)
             self._fill_tree(self.mix_tree, mixing, ("Reagent", "Volume_uL"))
             self.summary.set("{} transfers • {} unique staples • {:.3f} µL available • {:.3f} µL requested".format(len(picklist), len(unique_sources), available_ul, requested_ul))

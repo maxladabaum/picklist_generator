@@ -34,6 +34,8 @@ bundled `.example.json` defaults:
   plate name, transfer settings, and last successful run.
 - `destination_plate_state.json` records transfer count, volume, and last-use
   time for every destination well used by a successful generation.
+- `storage_state.json` stores each named run's picklist, mixing-recipe rows, and
+  replacement-panel selection metadata in the persistent Storage queue.
 
 At startup, the most recent output paths are restored. The destination-well
 field defaults to the first unused wells on the current destination plate,
@@ -59,15 +61,31 @@ plate after confirmation. Existing output folders are retained.
    row in the selected replacement CSV.
 2. Click **Check selections** at the bottom of the Replacements tab. Any
    selections targeting the same base well turn red with an × and are listed
-   in the compatibility box.
+   in the compatibility box. Use **Save selections PDF** to export one PDF
+   report containing selected replacements from every used panel, including
+   panels that are not currently visible. The PDF is saved automatically in a
+   new timestamped folder beneath the configured Generated output root.
 3. Open **Run & Mixing Settings**. Confirm destination wells, volumes, plate
    names, and mixing inputs.
 4. Click **Generate Picklist + Mixing Recipe**.
 5. Open **Destination Plate** to see the 16×24 plate map. Previously used wells,
    wells at capacity, and the wells currently entered in Settings have distinct
    colors. Click any well for its recorded transfer and volume details.
-6. Review the previews under **Results**. The complete CSV files are saved at
-   the paths shown in the settings.
+6. Review the previews under **Results**. Click **Add latest run to storage**,
+   enter a run name, and keep that picklist, mixing recipe, and replacement-panel
+   selection metadata in the persistent Storage queue.
+7. In **Storage**, select individual runs (Command/Ctrl-click for multiple), or
+   click **Select all**, then click **Generate combined picklist + recipe**. The
+   transfer rows are concatenated and matching reagent volumes are summed into
+   a new timestamped output folder. Runs that reuse the same destination plate
+   and well cannot be combined.
+8. Use **Generate selections PDF** in Storage to create one large PDF for the
+   selected runs. Every named run starts on a new page and includes all of its
+   selected replacement panels. **Select all** includes every stored run. The
+   PDF is saved automatically in a new timestamped generated-output folder.
+9. Individual CSV paths are shown in Settings; after a combined generation,
+   the Storage tab reports its new output folder and a confirmation shows the
+   full path.
 
 Each replacement row identifies a base `Replace Well`. The generator removes
 that base well and substitutes the replacement sheet's source well. Selecting
@@ -83,16 +101,19 @@ volume.
 
 - `picklist_app.py` — Tkinter desktop interface
 - `picklist_core.py` — CSV parsing, replacement, transfer, and mixing logic
+- `selection_report.py` — dependency-free PDF selection-report renderer
 - `app_state.py` — persistent configuration and destination usage helpers
 - `config.example.json` — clean first-run configuration defaults
 - `destination_plate_state.example.json` — clean, unused plate-state example
+- `storage_state.example.json` — clean persistent-storage example
 - `config.json` — local user defaults and recent-run metadata, created at runtime
 - `destination_plate_state.json` — local 384-well state, created at runtime
+- `storage_state.json` — local stored-run queue, created at runtime
 - `replacement_sheets/` — all bundled source/replacement CSV files
 - `launch.command` / `launch.bat` / `launch.sh` — platform launchers
 - `tests/` — logic regression tests
 
-The `.venv/`, generated CSVs, `config.json`, and
-`destination_plate_state.json` are intentionally ignored by Git. This keeps
+The `.venv/`, generated CSVs, `config.json`, `destination_plate_state.json`,
+and `storage_state.json` are intentionally ignored by Git. This keeps
 each user's paths and plate history private. Commit the example JSON files so a
 fresh clone always starts with an unused destination plate.

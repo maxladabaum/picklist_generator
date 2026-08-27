@@ -7,3 +7,4 @@ generated_output/*
 *.json.tmp
 config.json
 destination_plate_state.json
+storage_state.json
