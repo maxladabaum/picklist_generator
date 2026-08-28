@@ -76,7 +76,7 @@ def _find_column(columns: Sequence[str], candidates: Sequence[str]) -> Optional[
 
 
 def parse_source1(path: Path) -> Tuple[List[Dict[str, str]], str]:
-    """Parse the base plate, including files with an optional preamble."""
+    """Parse the base plate, preserving logical replacement keys for relocated staples."""
     rows = _read_rows(Path(path))
     header_index = _header_index(rows, ("WELL POSITION", "SEQUENCE NAME"))
     records = _dict_rows(rows, header_index)
@@ -87,14 +87,27 @@ def parse_source1(path: Path) -> Tuple[List[Dict[str, str]], str]:
     sequence_column = _find_column(
         columns, ("Sequence with spaces", "Sequence (5' > 3')", "Sequence")
     )
+    original_well_column = _find_column(
+        columns, ("Original Well Position", "Original Well", "Replacement Key")
+    )
     if not well_column or not sequence_column:
         raise ValueError("Base source must contain well and sequence columns.")
-    parsed = [
-        {"Well": row.get(well_column, "").upper(), "Sequence": row.get(sequence_column, "")}
-        for row in records
-        if row.get(well_column, "")
-    ]
-    return parsed, _plate_name(rows, "SourcePlate1[1]")
+    by_replacement_key: Dict[str, Dict[str, str]] = {}
+    key_order: List[str] = []
+    for row in records:
+        well = row.get(well_column, "").upper()
+        if not well:
+            continue
+        original_well = row.get(original_well_column or "", "").upper()
+        replacement_key = original_well or well
+        if replacement_key not in by_replacement_key:
+            key_order.append(replacement_key)
+        by_replacement_key[replacement_key] = {
+            "Well": well,
+            "Replacement Well": replacement_key,
+            "Sequence": row.get(sequence_column, ""),
+        }
+    return [by_replacement_key[key] for key in key_order], _plate_name(rows, "SourcePlate1[1]")
 
 
 def parse_source2(path: Path) -> Tuple[List[Dict[str, str]], str]:
@@ -195,7 +208,7 @@ def generate_picklist(
     active = [
         {"Well": row["Well"], "Sequence": row["Sequence"], "Source Plate Name": base_plate_name}
         for row in base_rows
-        if row["Well"].upper() not in targets
+        if row.get("Replacement Well", row["Well"]).upper() not in targets
     ]
     active.extend(selected_replacements)
 

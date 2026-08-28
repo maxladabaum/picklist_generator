@@ -78,6 +78,46 @@ class PicklistCoreTests(unittest.TestCase):
         self.assertTrue(any(row["Source Plate Name"] == "SourcePlate3[3]" for row in rows))
         self.assertFalse(any(row["Source Plate Name"] == "SourcePlate1[1]" and row["Source Well"] == "J08" for row in rows))
 
+    def test_relocated_base_staples_use_new_wells_and_old_replacement_keys(self):
+        relocations = dict(zip(
+            "L11 L14 B11 B14 K08 K05 A08 A05 H05 H08 H11 H14 I05 I08 I11 I14".split(),
+            "B19 B20 B21 B22 C19 C20 C21 C22 D17 D18 D19 D20 D21 D22 D23 D24".split(),
+        ))
+        base, _ = parse_source1(SHEETS / "book_base.csv")
+        by_key = {row["Replacement Well"]: row["Well"] for row in base}
+        self.assertEqual({old: by_key[old] for old in relocations}, relocations)
+
+        rows = generate_picklist(SHEETS / "book_base.csv", [], ["A01", "A02"])
+        base_wells = {
+            row["Source Well"] for row in rows if row["Source Plate Name"] == "SourcePlate1[1]"
+        }
+        self.assertTrue(set(relocations.values()).issubset(base_wells))
+        self.assertTrue(set(relocations).isdisjoint(base_wells))
+
+        with tempfile.TemporaryDirectory() as folder:
+            replacement = Path(folder) / "replacement.csv"
+            replacement.write_text(
+                "Well,Name,Sequence,Replace Well\nA01,R1 PAINT example,ACGT,L14\n",
+                encoding="utf-8",
+            )
+            replaced = generate_picklist(
+                SHEETS / "book_base.csv",
+                [ReplacementSelection(replacement, ["R1 PAINT example"], "ReplacementPlate[1]")],
+                ["A01", "A02"],
+            )
+        self.assertFalse(
+            any(
+                row["Source Plate Name"] == "SourcePlate1[1]" and row["Source Well"] == "B20"
+                for row in replaced
+            )
+        )
+        self.assertTrue(
+            any(
+                row["Source Plate Name"] == "ReplacementPlate[1]" and row["Source Well"] == "A01"
+                for row in replaced
+            )
+        )
+
     def test_duplicate_replacement_target_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "Duplicate replacement"):
             generate_picklist(
