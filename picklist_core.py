@@ -310,18 +310,18 @@ def combine_picklists(
     return combined
 
 
-def combine_mixing_recipes(
+def separate_mixing_recipes(
     recipes: Sequence[Sequence[Dict[str, object]]],
-) -> List[Dict[str, float]]:
-    """Sum matching reagent volumes across multiple stored mixing recipes."""
+) -> List[List[Dict[str, object]]]:
+    """Validate and preserve one independent mixing recipe for each stored run."""
     if not recipes:
         raise ValueError("Select at least one stored mixing recipe.")
 
-    reagent_order: List[str] = []
-    totals: Dict[str, float] = {}
+    separated: List[List[Dict[str, object]]] = []
     for recipe_index, rows in enumerate(recipes, 1):
         if not rows:
             raise ValueError("Stored mixing recipe {} contains no rows.".format(recipe_index))
+        recipe: List[Dict[str, object]] = []
         for row in rows:
             reagent = _clean(row.get("Reagent"))
             if not reagent:
@@ -330,11 +330,9 @@ def combine_mixing_recipes(
                 volume = float(row.get("Volume_uL", 0))
             except (TypeError, ValueError) as exc:
                 raise ValueError("Stored volume for '{}' is not numeric.".format(reagent)) from exc
-            if reagent not in totals:
-                reagent_order.append(reagent)
-                totals[reagent] = 0.0
-            totals[reagent] += volume
-    return [{"Reagent": reagent, "Volume_uL": totals[reagent]} for reagent in reagent_order]
+            recipe.append({"Reagent": reagent, "Volume_uL": volume})
+        separated.append(recipe)
+    return separated
 
 
 def write_csv(path: Path, rows: Sequence[Dict[str, object]], columns: Sequence[str]) -> None:

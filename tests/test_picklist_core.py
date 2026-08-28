@@ -14,11 +14,11 @@ from app_state import (
 from picklist_core import (
     ReplacementSelection,
     calculate_mixing_volumes,
-    combine_mixing_recipes,
     combine_picklists,
     generate_picklist,
     parse_source1,
     parse_source2,
+    separate_mixing_recipes,
 )
 from selection_report import write_replacement_selection_pdf, write_stored_runs_selection_pdf
 
@@ -133,17 +133,17 @@ class PicklistCoreTests(unittest.TestCase):
         )
         self.assertAlmostEqual(sum(row["Volume_uL"] for row in recipe), 500.0)
 
-    def test_stored_picklists_and_recipes_combine(self):
+    def test_stored_picklists_combine_and_recipes_remain_separate(self):
         first = [{"Destination Plate Name": "Destination[1]", "Destination Well": "A01", "Transfer Volume": 50}]
         second = [{"Destination Plate Name": "Destination[1]", "Destination Well": "A02", "Transfer Volume": 50}]
         self.assertEqual(combine_picklists([first, second]), first + second)
-        recipe = combine_mixing_recipes([
+        recipes = separate_mixing_recipes([
             [{"Reagent": "Staple", "Volume_uL": 1.25}, {"Reagent": "Water", "Volume_uL": 8.75}],
             [{"Reagent": "Staple", "Volume_uL": 2.5}, {"Reagent": "Water", "Volume_uL": 17.5}],
         ])
-        self.assertEqual(recipe, [
-            {"Reagent": "Staple", "Volume_uL": 3.75},
-            {"Reagent": "Water", "Volume_uL": 26.25},
+        self.assertEqual(recipes, [
+            [{"Reagent": "Staple", "Volume_uL": 1.25}, {"Reagent": "Water", "Volume_uL": 8.75}],
+            [{"Reagent": "Staple", "Volume_uL": 2.5}, {"Reagent": "Water", "Volume_uL": 17.5}],
         ])
 
     def test_combining_picklists_rejects_overlapping_destination_wells(self):

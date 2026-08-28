@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import tkinter as tk
@@ -30,12 +31,12 @@ from picklist_core import (
     PICKLIST_COLUMNS,
     ReplacementSelection,
     calculate_mixing_volumes,
-    combine_mixing_recipes,
     combine_picklists,
     generate_picklist,
     parse_vector,
     parse_source2,
     replacement_names,
+    separate_mixing_recipes,
     valid_well_list,
     write_csv,
 )
@@ -534,6 +535,10 @@ class PicklistApp(tk.Tk):
         self.last_mix: List[Dict[str, float]] = []
         self.last_design_names: List[str] = []
         self.last_selection_panels: List[Dict[str, object]] = []
+        self.last_run_id = ""
+        self.last_run_committed = False
+        self.last_run_saved = False
+        self.last_run_stored = False
         self._build()
 
     def _set_style(self) -> None:
@@ -547,7 +552,7 @@ class PicklistApp(tk.Tk):
         header = ttk.Frame(self, padding=(14, 10))
         header.pack(fill="x")
         ttk.Label(header, text="Echo Picklist Generator", style="Title.TLabel").pack(side="left")
-        ttk.Label(header, text="Select replacements, configure the run, then generate both CSV files.").pack(side="left", padx=18)
+        ttk.Label(header, text="Select replacements, preview the run, then save it or send it to storage.").pack(side="left", padx=18)
         main_tabs = ttk.Notebook(self)
         main_tabs.pack(fill="both", expand=True, padx=12, pady=(0, 8))
         replacement_page = ttk.Frame(main_tabs)
@@ -937,7 +942,7 @@ class PicklistApp(tk.Tk):
         action = ttk.Frame(page, padding=14)
         action.grid(row=2, column=0, sticky="ew")
         self.status = tk.StringVar(value="Ready")
-        ttk.Button(action, text="Generate Picklist + Mixing Recipe", style="Generate.TButton", command=lambda: self.generate(tabs, preview_page)).pack(side="left")
+        ttk.Button(action, text="Generate Preview", style="Generate.TButton", command=lambda: self.generate(tabs, preview_page)).pack(side="left")
         ttk.Button(action, text="Open latest output folder", command=self._open_latest_output).pack(side="left", padx=10)
         ttk.Label(action, textvariable=self.status).pack(side="left", padx=10)
 
@@ -946,11 +951,16 @@ class PicklistApp(tk.Tk):
         top.pack(fill="x")
         self.summary = tk.StringVar(value="Generate a run to see results.")
         ttk.Label(top, textvariable=self.summary).pack(side="left", fill="x", expand=True)
-        self.add_storage_button = ttk.Button(
-            top, text="Add latest run to storage", command=self._add_latest_to_storage
+        self.send_storage_button = ttk.Button(
+            top, text="Send to storage", command=self._add_latest_to_storage
         )
-        self.add_storage_button.pack(side="right")
-        self.add_storage_button.configure(state="disabled")
+        self.send_storage_button.pack(side="right")
+        self.save_run_button = ttk.Button(
+            top, text="Save picklist + recipe", command=self._save_latest_run
+        )
+        self.save_run_button.pack(side="right", padx=(0, 8))
+        self.send_storage_button.configure(state="disabled")
+        self.save_run_button.configure(state="disabled")
         notebook = ttk.Notebook(page)
         notebook.pack(fill="both", expand=True, padx=10, pady=5)
         pick_page, mix_page = ttk.Frame(notebook), ttk.Frame(notebook)
@@ -966,7 +976,6 @@ class PicklistApp(tk.Tk):
             top,
             text="Stored runs remain available after restarting. Select rows to combine CSVs or export selections.",
         ).pack(side="left", fill="x", expand=True)
-        ttk.Button(top, text="Add latest run", command=self._add_latest_to_storage).pack(side="right")
 
         actions = ttk.Frame(page, padding=(12, 0, 12, 8))
         actions.pack(fill="x")
@@ -986,7 +995,7 @@ class PicklistApp(tk.Tk):
         ).pack(side="right", padx=(6, 0))
         ttk.Button(
             actions,
-            text="Generate combined picklist + recipe",
+            text="Generate combined picklist + recipes",
             style="Generate.TButton",
             command=self._generate_combined_storage,
         ).pack(side="right")
@@ -1052,6 +1061,8 @@ class PicklistApp(tk.Tk):
         existing = [item_id for item_id in selected if self.storage_tree.exists(item_id)]
         if existing:
             self.storage_tree.selection_set(existing)
+        elif self.storage_tree.get_children():
+            self.storage_tree.selection_set(self.storage_tree.get_children())
         self._update_storage_status()
 
     def _update_storage_status(self) -> None:
@@ -1072,10 +1083,11 @@ class PicklistApp(tk.Tk):
                 "Nothing to store", "Generate a picklist and mixing recipe first.", parent=self
             )
             return
-        source_path = self._portable_path(self.picklist_path.get())
-        if any(item.get("source_picklist_path") == source_path for item in self._storage_items()):
+        if self.last_run_stored or any(
+            item.get("source_run_id") == self.last_run_id for item in self._storage_items()
+        ):
             messagebox.showinfo(
-                "Already stored", "The latest generated run is already in storage.", parent=self
+                "Already stored", "This preview is already in storage.", parent=self
             )
             return
         destination_wells = list(
@@ -1114,8 +1126,13 @@ class PicklistApp(tk.Tk):
             "destination_plate_name": destination_plate,
             "destination_wells": destination_wells,
             "transfer_count": len(self.last_picklist),
-            "source_picklist_path": source_path,
-            "source_recipe_path": self._portable_path(self.mix_path.get()),
+            "source_run_id": self.last_run_id,
+            "source_picklist_path": (
+                self._portable_path(self.picklist_path.get()) if self.last_run_saved else ""
+            ),
+            "source_recipe_path": (
+                self._portable_path(self.mix_path.get()) if self.last_run_saved else ""
+            ),
             "picklist": [dict(row) for row in self.last_picklist],
             "mixing_recipe": [dict(row) for row in self.last_mix],
         }
@@ -1124,8 +1141,108 @@ class PicklistApp(tk.Tk):
         self.storage_state["updated_utc"] = item["created_utc"]
         save_json(STORAGE_STATE_PATH, self.storage_state)
         self._refresh_storage_tree()
-        self.storage_tree.selection_set(str(item["id"]))
+        self._select_all_storage()
+        self.last_run_stored = True
+        self._commit_latest_run()
+        self._update_result_action_buttons()
         self.status.set("'{}' added to storage".format(run_name))
+
+    def _update_result_action_buttons(self) -> None:
+        if not hasattr(self, "save_run_button"):
+            return
+        has_preview = bool(self.last_picklist and self.last_mix)
+        self.save_run_button.configure(
+            state="normal" if has_preview and not self.last_run_saved else "disabled"
+        )
+        self.send_storage_button.configure(
+            state="normal" if has_preview and not self.last_run_stored else "disabled"
+        )
+
+    def _commit_latest_run(self) -> None:
+        """Record destination usage once, whether the preview is saved or stored first."""
+        if self.last_run_committed:
+            return
+        if not self.last_picklist:
+            raise ValueError("Generate a preview first.")
+        record_transfers(self.plate_state, self.last_picklist)
+        save_json(PLATE_STATE_PATH, self.plate_state)
+        used_destination_wells = list(
+            dict.fromkeys(str(row["Destination Well"]) for row in self.last_picklist)
+        )
+        destination_plate = str(
+            self.last_picklist[0].get("Destination Plate Name", "Destination[1]")
+        )
+        self.config["recent_destination_wells"] = used_destination_wells
+        next_destination_wells = next_unused_wells(
+            self.plate_state, destination_plate, len(used_destination_wells) or 1
+        )
+        self.starting_well.set("")
+        self.destination_wells.set(",".join(next_destination_wells))
+        self.config["last_committed_run"] = {
+            "committed_utc": self.plate_state.get("updated_utc"),
+            "run_id": self.last_run_id,
+            "transfer_count": len(self.last_picklist),
+            "destination_plate_name": destination_plate,
+            "destination_wells": used_destination_wells,
+        }
+        self.last_run_committed = True
+        self._flush_config()
+
+    def _save_latest_run(self) -> None:
+        if not self.last_picklist or not self.last_mix:
+            messagebox.showinfo(
+                "Nothing to save", "Generate a picklist and mixing recipe preview first.", parent=self
+            )
+            return
+        if self.last_run_saved:
+            messagebox.showinfo("Already saved", "This preview has already been saved.", parent=self)
+            return
+        try:
+            output_root = Path(self.output_root.get()).expanduser()
+            if not output_root.is_absolute():
+                output_root = APP_DIR / output_root
+            picklist_filename = Path(self.picklist_path.get()).name or "picklist_combined.csv"
+            recipe_filename = Path(self.mix_path.get()).name or "mixing_recipe.csv"
+            if picklist_filename == recipe_filename:
+                raise ValueError("Picklist and recipe filenames must be different.")
+            run_directory = create_run_output_directory(output_root)
+            picklist_output = run_directory / picklist_filename
+            recipe_output = run_directory / recipe_filename
+            write_csv(picklist_output, self.last_picklist, PICKLIST_COLUMNS)
+            write_csv(recipe_output, self.last_mix, ("Reagent", "Volume_uL"))
+            self.picklist_path.set(str(picklist_output))
+            self.mix_path.set(str(recipe_output))
+            self.last_run_saved = True
+            self._commit_latest_run()
+            storage_updated = False
+            for item in self._storage_items():
+                if item.get("source_run_id") == self.last_run_id:
+                    item["source_picklist_path"] = self._portable_path(self.picklist_path.get())
+                    item["source_recipe_path"] = self._portable_path(self.mix_path.get())
+                    storage_updated = True
+            if storage_updated:
+                self.storage_state["updated_utc"] = datetime.now(timezone.utc).isoformat()
+                save_json(STORAGE_STATE_PATH, self.storage_state)
+            used_destination_wells = list(
+                dict.fromkeys(str(row["Destination Well"]) for row in self.last_picklist)
+            )
+            self.config["last_successful_generation"] = {
+                "generated_utc": self.plate_state.get("updated_utc"),
+                "run_id": self.last_run_id,
+                "transfer_count": len(self.last_picklist),
+                "destination_plate_name": str(
+                    self.last_picklist[0].get("Destination Plate Name", "")
+                ),
+                "destination_wells": used_destination_wells,
+                "picklist_path": self._portable_path(self.picklist_path.get()),
+                "recipe_path": self._portable_path(self.mix_path.get()),
+            }
+            self._flush_config()
+            self._update_result_action_buttons()
+            self.status.set("Saved picklist and recipe in {}".format(run_directory.name))
+        except Exception as exc:
+            self.status.set("Save failed")
+            messagebox.showerror("Could not save files", str(exc), parent=self)
 
     def _selected_storage_items(self) -> List[Dict[str, object]]:
         selected = set(self.storage_tree.selection())
@@ -1217,24 +1334,32 @@ class PicklistApp(tk.Tk):
             picklists = [item.get("picklist", []) for item in selected]
             recipes = [item.get("mixing_recipe", []) for item in selected]
             combined_picklist = combine_picklists(picklists)  # type: ignore[arg-type]
-            combined_recipe = combine_mixing_recipes(recipes)  # type: ignore[arg-type]
+            separated_recipes = separate_mixing_recipes(recipes)  # type: ignore[arg-type]
             output_root = Path(self.output_root.get()).expanduser()
             if not output_root.is_absolute():
                 output_root = APP_DIR / output_root
             run_directory = create_run_output_directory(output_root)
             picklist_output = run_directory / "picklist_combined.csv"
-            recipe_output = run_directory / "mixing_recipe_combined.csv"
             write_csv(picklist_output, combined_picklist, PICKLIST_COLUMNS)
-            write_csv(recipe_output, combined_recipe, ("Reagent", "Volume_uL"))
+            for index, (item, recipe) in enumerate(zip(selected, separated_recipes), 1):
+                run_name = str(item.get("run_name", "")).strip() or "run_{}".format(index)
+                safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", run_name).strip("_")[:80]
+                safe_name = safe_name or "run_{}".format(index)
+                recipe_output = run_directory / "mixing_recipe_{:02d}_{}.csv".format(
+                    index, safe_name
+                )
+                write_csv(recipe_output, recipe, ("Reagent", "Volume_uL"))
             self.storage_status.set(
-                "Combined {} runs into {} transfers; files saved in {}".format(
-                    len(selected), len(combined_picklist), run_directory.name
+                "Combined {} runs into {} transfers and {} separate recipes; files saved in {}".format(
+                    len(selected), len(combined_picklist), len(separated_recipes), run_directory.name
                 )
             )
             messagebox.showinfo(
                 "Combined files generated",
-                "Saved picklist_combined.csv and mixing_recipe_combined.csv in:\n{}".format(
-                    run_directory
+                "Saved picklist_combined.csv and {} separate mixing recipe{} in:\n{}".format(
+                    len(separated_recipes),
+                    "" if len(separated_recipes) == 1 else "s",
+                    run_directory,
                 ),
                 parent=self,
             )
@@ -1291,61 +1416,22 @@ class PicklistApp(tk.Tk):
             requested_ul = mixing[0]["Volume_uL"]
             if requested_ul > available_ul + 1e-9:
                 raise ValueError("Requested staple volume ({:.3f} µL) exceeds picklist availability ({:.3f} µL).".format(requested_ul, available_ul))
-            output_root = Path(self.output_root.get()).expanduser()
-            if not output_root.is_absolute():
-                output_root = APP_DIR / output_root
-            picklist_filename = Path(self.picklist_path.get()).name or "picklist_combined.csv"
-            recipe_filename = Path(self.mix_path.get()).name or "mixing_recipe.csv"
-            if picklist_filename == recipe_filename:
-                raise ValueError("Picklist and recipe filenames must be different.")
-            run_directory = create_run_output_directory(output_root)
-            picklist_output = run_directory / picklist_filename
-            recipe_output = run_directory / recipe_filename
-            write_csv(picklist_output, picklist, PICKLIST_COLUMNS)
-            write_csv(recipe_output, mixing, ("Reagent", "Volume_uL"))
-            self.picklist_path.set(str(picklist_output))
-            self.mix_path.set(str(recipe_output))
-            record_transfers(self.plate_state, picklist)
-            save_json(PLATE_STATE_PATH, self.plate_state)
-            used_destination_wells = list(
-                dict.fromkeys(str(row["Destination Well"]) for row in picklist)
-            )
-            self.config["recent_destination_wells"] = used_destination_wells
-            next_destination_wells = next_unused_wells(
-                self.plate_state,
-                self.destination_plate.get().strip() or "Destination[1]",
-                len(used_destination_wells) or 1,
-            )
-            self.starting_well.set("")
-            self.destination_wells.set(",".join(next_destination_wells))
-            self.config["last_successful_generation"] = {
-                "generated_utc": self.plate_state.get("updated_utc"),
-                "transfer_count": len(picklist),
-                "destination_plate_name": self.destination_plate.get().strip(),
-                "destination_wells": used_destination_wells,
-                "picklist_path": self._portable_path(self.picklist_path.get()),
-                "recipe_path": self._portable_path(self.mix_path.get()),
-            }
-            self._flush_config()
             self.last_picklist, self.last_mix = picklist, mixing
             self.last_design_names = design_names
             self.last_selection_panels = self._replacement_selection_panels()
-            self.add_storage_button.configure(state="normal")
+            self.last_run_id = uuid4().hex
+            self.last_run_committed = False
+            self.last_run_saved = False
+            self.last_run_stored = False
+            self._update_result_action_buttons()
             self._fill_tree(self.pick_tree, picklist[:500], PICKLIST_COLUMNS)
             self._fill_tree(self.mix_tree, mixing, ("Reagent", "Volume_uL"))
             self.summary.set("{} transfers • {} unique staples • {:.3f} µL available • {:.3f} µL requested".format(len(picklist), len(unique_sources), available_ul, requested_ul))
-            if next_destination_wells:
-                self.status.set(
-                    "Success — files saved in {}; next destination wells: {}".format(
-                        run_directory.name, ",".join(next_destination_wells)
-                    )
-                )
-            else:
-                self.status.set("Success — files saved in {}; destination plate is full".format(run_directory.name))
+            self.status.set("Preview ready — choose Save picklist + recipe or Send to storage")
             tabs.select(preview_page)
         except Exception as exc:
             self.status.set("Generation failed")
-            messagebox.showerror("Could not generate files", str(exc), parent=self)
+            messagebox.showerror("Could not generate preview", str(exc), parent=self)
 
     @staticmethod
     def _fill_tree(tree: ttk.Treeview, rows: Sequence[Dict[str, object]], columns: Sequence[str]) -> None:

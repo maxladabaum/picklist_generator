@@ -67,18 +67,22 @@ plate after confirmation. Existing output folders are retained.
    new timestamped folder beneath the configured Generated output root.
 3. Open **Run & Mixing Settings**. Confirm destination wells, volumes, plate
    names, and mixing inputs.
-4. Click **Generate Picklist + Mixing Recipe**.
+4. Click **Generate Preview**. This calculates the picklist and mixing recipe
+   without writing files, recording destination usage, or advancing wells.
 5. Open **Destination Plate** to see the 16×24 plate map. Previously used wells,
    wells at capacity, and the wells currently entered in Settings have distinct
    colors. Click any well for its recorded transfer and volume details.
-6. Review the previews under **Results**. Click **Add latest run to storage**,
-   enter a run name, and keep that picklist, mixing recipe, and replacement-panel
-   selection metadata in the persistent Storage queue.
+6. Review the previews under **Results**. Choose **Save picklist + recipe** to
+   write the individual CSV files, or choose **Send to storage** and enter a run
+   name without writing those individual files. Either action records the
+   destination usage and advances the wells once. You can subsequently use the
+   other action on the same preview without recording the transfers twice.
 7. In **Storage**, select individual runs (Command/Ctrl-click for multiple), or
    click **Select all**, then click **Generate combined picklist + recipe**. The
-   transfer rows are concatenated and matching reagent volumes are summed into
-   a new timestamped output folder. Runs that reuse the same destination plate
-   and well cannot be combined.
+   transfer rows are concatenated into one large picklist, while each run keeps
+   its own mixing-recipe CSV with the run name in its filename. Volumes are not
+   summed across runs. Everything is written to a new timestamped output folder.
+   Runs that reuse the same destination plate and well cannot be combined.
 8. Use **Generate selections PDF** in Storage to create one large PDF for the
    selected runs. Every named run starts on a new page and includes all of its
    selected replacement panels. **Select all** includes every stored run. The
