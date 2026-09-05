@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 import subprocess
 import sys
@@ -11,7 +12,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from uuid import uuid4
 
 from app_state import (
@@ -28,6 +29,7 @@ from app_state import (
     unused_wells_from,
 )
 from picklist_core import (
+    HINGE_TYPES,
     PICKLIST_COLUMNS,
     ReplacementSelection,
     calculate_mixing_volumes,
@@ -41,6 +43,17 @@ from picklist_core import (
     write_csv,
 )
 from selection_report import write_replacement_selection_pdf, write_stored_runs_selection_pdf
+from template_generator import (
+    EXTENSION_COLUMN_SPACING_NM,
+    EXTENSION_ROW_SPACING_NM,
+    empty_logical_bit_schema,
+    logical_group_color,
+    logical_template_sites,
+    normalize_logical_bit_schema,
+    save_barcode_template,
+    template_size_nm,
+    validate_template_settings,
+)
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -55,6 +68,7 @@ STORAGE_STATE_EXAMPLE_PATH = APP_DIR / "storage_state.example.json"
 
 DEFAULT_CONFIG = {
     "version": 1,
+    "hinge_type": "original",
     "save_picklist_path": "generated_output/picklist_combined.csv",
     "save_recipe_path": "generated_output/mixing_recipe.csv",
     "output_root_path": "generated_output",
@@ -102,6 +116,7 @@ class SetView:
         plate_name: str,
         panels: Sequence[Dict[str, object]],
         selection_changed=None,
+        template_requested=None,
     ) -> None:
         self.title = title
         self.path_var = tk.StringVar(value=str(csv_path))
@@ -113,6 +128,7 @@ class SetView:
         self.available: Set[str] = set()
         self.conflicts: Set[str] = set()
         self.selection_changed = selection_changed
+        self.template_requested = template_requested
         self.panels = panels
 
         scroll = ScrollFrame(parent)
@@ -136,8 +152,18 @@ class SetView:
         )
         self.panel_picker.pack(side="left", padx=(6, 12))
         self.panel_picker.bind("<<ComboboxSelected>>", lambda _event: self._show_panel())
+        if self.template_requested is not None:
+            ttk.Button(
+                panel_bar,
+                text="Make template from this panel",
+                command=self._request_template,
+            ).pack(side="right")
         self.selection_summary = tk.StringVar(value="0 selected in this set")
         ttk.Label(panel_bar, textvariable=self.selection_summary, foreground="#555555").pack(side="left")
+        self.orientation_summary = tk.StringVar()
+        ttk.Label(panel_bar, textvariable=self.orientation_summary, foreground="#3d626f").pack(
+            side="left", padx=(12, 0)
+        )
         if self.title in {"Aptamers", "MB", "PAINT P1", "PAINT R1"}:
             legend = tk.Frame(scroll.inner, background="#f0f0f0")
             legend.pack(fill="x", padx=12, pady=(4, 2))
@@ -188,27 +214,61 @@ class SetView:
             child.destroy()
         self.buttons.clear()
         self.color_frames.clear()
-        selected_label = self.panel_var.get()
-        panel = next((item for item in self.panels if str(item["label"]) == selected_label), self.panels[0])
+        panel = self._current_panel()
+        pitch = "{:.4g} nm columns; {:.4g} nm rows".format(
+            EXTENSION_COLUMN_SPACING_NM,
+            EXTENSION_ROW_SPACING_NM,
+        )
+        if panel.get("mirror_columns", False):
+            orientation = "U physical orientation: {} mirrored (12 → 1)".format(pitch)
+        elif list(panel["columns"]) == COLS:
+            orientation = "D physical orientation: {} (1 → 12)".format(pitch)
+        else:
+            orientation = "Columns shown in listed order"
+        self.orientation_summary.set(orientation)
         self._build_panel(panel, self.available)
         self._update_selection_summary()
+
+    def _current_panel(self) -> Dict[str, object]:
+        selected_label = self.panel_var.get()
+        return next((item for item in self.panels if str(item["label"]) == selected_label), self.panels[0])
+
+    def _request_template(self) -> None:
+        panel = self._current_panel()
+        selected_names = set(self.selected())
+        selected_positions = panel_template_positions(panel, selected_names)
+        if not selected_positions:
+            messagebox.showinfo(
+                "No sites selected",
+                "Select at least one position in {} before making its template.".format(panel["label"]),
+                parent=self.panel_host,
+            )
+            return
+        self.template_requested(self.title, panel, selected_positions)
 
     def _build_panel(self, panel: Dict[str, object], available: Set[str]) -> None:
         label = str(panel["label"])
         frame = ttk.LabelFrame(self.panel_host, text=label)
         frame.pack(fill="x", pady=5)
         rows = list(panel["rows"])
-        columns = list(panel["columns"])
+        columns = panel_display_columns(panel)
         active = panel.get("active")
         colors = panel.get("colors", {})
+        spacing_x_nm = panel.get("spacing_x_nm")
+        spacing_y_nm = panel.get("spacing_y_nm")
+        physical_layout = spacing_x_nm is not None and spacing_y_nm is not None
         unavailable_in_panel = []
 
         header_row = 0
         ttk.Label(frame, text="").grid(row=header_row, column=0, padx=3)
         for ci, column in enumerate(columns, 1):
+            if physical_layout:
+                frame.grid_columnconfigure(ci, minsize=int(round(float(spacing_x_nm) * 5.0)))
             ttk.Label(frame, text=str(column), anchor="center").grid(row=header_row, column=ci, padx=3)
         for ri, row in enumerate(rows, 1):
             grid_row = header_row + ri
+            if physical_layout:
+                frame.grid_rowconfigure(grid_row, minsize=int(round(float(spacing_y_nm) * 5.0)))
             ttk.Label(frame, text=str(row), width=6, anchor="e").grid(row=grid_row, column=0, padx=(4, 8))
             for ci, column in enumerate(columns, 1):
                 position = (str(row), str(column))
@@ -221,8 +281,13 @@ class SetView:
                 color_frame = None
                 button_parent = frame
                 if color:
-                    color_frame = tk.Frame(frame, background=str(color), padx=2, pady=2)
-                    color_frame.grid(row=grid_row, column=ci, padx=(3, 12 if ci == 6 else 3), pady=2)
+                    color_frame = tk.Frame(frame, background=str(color), padx=1, pady=1)
+                    color_frame.grid(
+                        row=grid_row,
+                        column=ci,
+                        padx=0 if physical_layout else (3, 12 if ci == 6 else 3),
+                        pady=0 if physical_layout else 2,
+                    )
                     button_parent = color_frame
                 button = tk.Checkbutton(
                     button_parent,
@@ -249,7 +314,12 @@ class SetView:
                     if configured:
                         self.color_frames[name] = color_frame
                 else:
-                    button.grid(row=grid_row, column=ci, padx=(3, 12 if ci == 6 else 3), pady=2)
+                    button.grid(
+                        row=grid_row,
+                        column=ci,
+                        padx=0 if physical_layout else (3, 12 if ci == 6 else 3),
+                        pady=0 if physical_layout else 2,
+                    )
                 if configured:
                     self.buttons[name] = button
                     if not is_selectable:
@@ -332,8 +402,29 @@ class SetView:
 
 
 def panel_sequence_name(panel: Dict[str, object], row: object, column: object) -> str:
+    if "sequence_names" in panel:
+        return panel["sequence_names"].get((str(row), str(column)), "")
     template = str(panel.get("name_template", "{label}_{row}-{column}"))
     return template.format(label=panel["label"], row=row, column=column)
+
+
+def panel_display_columns(panel: Dict[str, object]) -> List[object]:
+    """Return columns in their physical left-to-right display order."""
+    columns = list(panel["columns"])
+    return list(reversed(columns)) if panel.get("mirror_columns", False) else columns
+
+
+def panel_template_positions(
+    panel: Dict[str, object], selected_names: Iterable[str]
+) -> List[Tuple[int, int]]:
+    """Map selected sequences into the panel's physical displayed orientation."""
+    selected = set(selected_names)
+    return [
+        (row_index, column_index)
+        for row_index, row in enumerate(panel["rows"])
+        for column_index, column in enumerate(panel_display_columns(panel))
+        if panel_sequence_name(panel, row, column) in selected
+    ]
 
 
 def dense_panel(
@@ -341,6 +432,7 @@ def dense_panel(
     active: Optional[Set[Tuple[str, str]]] = None,
     colors=None,
     name_template: Optional[str] = None,
+    mirror_columns: bool = False,
 ) -> Dict[str, object]:
     panel: Dict[str, object] = {
         "label": label,
@@ -348,10 +440,36 @@ def dense_panel(
         "columns": COLS,
         "active": active,
         "colors": colors or {},
+        "mirror_columns": mirror_columns,
+        "spacing_x_nm": EXTENSION_COLUMN_SPACING_NM,
+        "spacing_y_nm": EXTENSION_ROW_SPACING_NM,
     }
     if name_template is not None:
         panel["name_template"] = name_template
     return panel
+
+
+def soyeon_mb_panels() -> List[Dict[str, object]]:
+    """Keep the supplied sequence names while displaying their encoded sites."""
+    records, _ = parse_source2(SHEET_DIR / "soyeon_MB_replace.csv")
+    panels = []
+    for prefix, label, rows in (
+        ("D_MB", "Soyeon D-MB", ROWS),
+        ("DL_", "Soyeon DL", ["00", "13"]),
+    ):
+        names = {}
+        for record in records:
+            match = re.fullmatch(r"" + prefix + r"(\d{2})_(\d{2})_\[[A-P]\d{2}\]", record["Name"])
+            if match:
+                row, column = match.groups()
+                names[("H" + row if prefix == "D_MB" else row, column)] = record["Name"]
+        panels.append({
+            "label": label, "rows": rows, "columns": COLS,
+            "active": set(names), "sequence_names": names,
+            "spacing_x_nm": EXTENSION_COLUMN_SPACING_NM,
+            "spacing_y_nm": EXTENSION_ROW_SPACING_NM,
+        })
+    return panels
 
 
 def panel_definitions() -> List[Tuple[str, str, str, List[Dict[str, object]]]]:
@@ -383,15 +501,38 @@ def panel_definitions() -> List[Tuple[str, str, str, List[Dict[str, object]]]]:
     for label in ("PDGF-14", "PDGF-18", "PDGF-22", "PDGF-26", "PDGF-30", "PDGF-34", "PDGF-38", "Kana-14", "Kana-18", "Kana-22"):
         c_panels.append({"label": label, "rows": ["Top", "Mid", "Bot"], "columns": ["L3", "L2", "L1", "R1", "R2", "R3"], "active": right})
     return [
-        ("Yaritza Extensions", "yaritza_replace.csv", "SourcePlate3[3]", [dense_panel("D-Apt"), dense_panel("U-Apt")]),
+        (
+            "Yaritza Extensions",
+            "yaritza_replace.csv",
+            "SourcePlate3[3]",
+            [dense_panel("D-Apt"), dense_panel("U-Apt", mirror_columns=True)],
+        ),
         ("Aptamers", "max_replace.csv", "SourcePlate4[4]", c_panels),
-        ("MB", "max_replace_MB.csv", "SourcePlate4[4]", [dense_panel("D-MB", set_d), dense_panel("U-MB", set_u)]),
-        ("PAINT P1", "PAINT_replace.csv", "SourcePlate5[5]", [dense_panel("D-Biotin", set_e), dense_panel("U-PAINT", colors=colors)]),
+        ("Soyeon MB", "soyeon_MB_replace.csv", "SoyeonMB[1]", soyeon_mb_panels()),
+        (
+            "MB",
+            "max_replace_MB.csv",
+            "SourcePlate4[4]",
+            [dense_panel("D-MB", set_d), dense_panel("U-MB", set_u, mirror_columns=True)],
+        ),
+        (
+            "PAINT P1",
+            "PAINT_replace.csv",
+            "SourcePlate5[5]",
+            [dense_panel("D-Biotin", set_e), dense_panel("U-PAINT", colors=colors, mirror_columns=True)],
+        ),
         (
             "PAINT R1",
             "PAINT_R1_replace.csv",
             "SourcePlate6[6]",
-            [dense_panel("U-Apt R1", colors=paint_r1_colors, name_template="U-Apt_{row}-{column}_R1")],
+            [
+                dense_panel(
+                    "U-Apt R1",
+                    colors=paint_r1_colors,
+                    name_template="U-Apt_{row}-{column}_R1",
+                    mirror_columns=True,
+                )
+            ],
         ),
     ]
 
@@ -510,6 +651,712 @@ class DestinationPlateView(ttk.Frame):
         )
 
 
+class OrigamiTemplateView(ttk.Frame):
+    """Interactive editor for bright-on-dark origami barcode templates."""
+
+    def __init__(self, parent: tk.Widget, initial_directory: Path) -> None:
+        super().__init__(parent, padding=12)
+        self.initial_directory = Path(initial_directory)
+        self.site_variables: Dict[Tuple[int, int], tk.BooleanVar] = {}
+        self.site_buttons: Dict[Tuple[int, int], tk.Button] = {}
+        self.logical_stroke_variables: Dict[str, tk.BooleanVar] = {}
+        self.logical_schema: Optional[Dict[str, object]] = empty_logical_bit_schema(8, 12)
+        self.selected_group_id: Optional[str] = None
+        self.group_name_var = tk.StringVar()
+        self.group_role_var = tk.StringVar(value="Digital bit")
+        self.group_active_var = tk.BooleanVar(value=True)
+        self._built_shape = (8, 12)
+        self.rows_var = tk.StringVar(value="8")
+        self.columns_var = tk.StringVar(value="12")
+        self.spacing_x_var = tk.StringVar(value=str(EXTENSION_COLUMN_SPACING_NM))
+        self.spacing_y_var = tk.StringVar(value=str(EXTENSION_ROW_SPACING_NM))
+        self.margin_var = tk.StringVar(value="20")
+        self.sigma_var = tk.StringVar(value="1.5")
+        self.width_var = tk.StringVar(value="500")
+        self.source_name = tk.StringVar(value="New custom digital-bit encoding")
+        self.status = tk.StringVar()
+        self._build()
+        self._rebuild_grid(select_all=False)
+
+    def _build(self) -> None:
+        ttk.Label(
+            self,
+            text="Build a barcode image for Origami → Identify Origami → Custom template.",
+            font=("TkDefaultFont", 12, "bold"),
+        ).pack(fill="x")
+        ttk.Label(
+            self,
+            text=(
+                "Create your own groups: select physical sites, name the group, and choose Digital bit or Alignment-only. "
+                "The colored PNG shows group membership; its embedded JSON tells Paint Analysis how to classify the bits. "
+                "The replacement panels and template preview use the same physical "
+                "{:.4g} nm × {:.4g} nm pitch (120 nm × 40 nm between outer site centers). "
+                "Keep the PNG free of borders and labels when editing it elsewhere."
+            ).format(EXTENSION_COLUMN_SPACING_NM, EXTENSION_ROW_SPACING_NM),
+            wraplength=1100,
+        ).pack(fill="x", pady=(3, 10))
+        ttk.Label(self, textvariable=self.source_name, foreground="#3d626f").pack(fill="x", pady=(0, 8))
+
+        body = ttk.Frame(self)
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(0, weight=1)
+
+        controls = ttk.LabelFrame(body, text="Template geometry", padding=10)
+        controls.grid(row=0, column=0, sticky="nsw", padx=(0, 10))
+        fields = (
+            ("Grid rows", self.rows_var),
+            ("Grid columns", self.columns_var),
+            ("Spacing x (nm)", self.spacing_x_var),
+            ("Spacing y (nm)", self.spacing_y_var),
+            ("Image margin (nm)", self.margin_var),
+            ("Spot sigma (nm)", self.sigma_var),
+            ("PNG width (px)", self.width_var),
+        )
+        for row, (label, variable) in enumerate(fields):
+            ttk.Label(controls, text=label).grid(row=row, column=0, sticky="w", pady=3)
+            entry = ttk.Entry(controls, textvariable=variable, width=10)
+            entry.grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=3)
+            entry.bind("<Return>", lambda _event: self._settings_changed())
+            entry.bind("<FocusOut>", lambda _event: self._settings_changed())
+        ttk.Button(controls, text="Apply grid size", command=self._rebuild_grid).grid(
+            row=len(fields), column=0, columnspan=2, sticky="ew", pady=(8, 3)
+        )
+        ttk.Separator(controls).grid(row=len(fields) + 1, column=0, columnspan=2, sticky="ew", pady=8)
+        ttk.Button(controls, text="Select all sites", command=self._select_all).grid(
+            row=len(fields) + 2, column=0, columnspan=2, sticky="ew", pady=2
+        )
+        ttk.Button(controls, text="Clear site selection", command=self._clear_all).grid(
+            row=len(fields) + 3, column=0, columnspan=2, sticky="ew", pady=2
+        )
+        ttk.Button(controls, text="Invert site selection", command=self._invert).grid(
+            row=len(fields) + 4, column=0, columnspan=2, sticky="ew", pady=2
+        )
+        ttk.Button(controls, text="Save template PNG…", command=self._save).grid(
+            row=len(fields) + 5, column=0, columnspan=2, sticky="ew", pady=(12, 2)
+        )
+        ttk.Button(controls, text="Load bit schema JSON…", command=self._load_logical_schema).grid(
+            row=len(fields) + 6, column=0, columnspan=2, sticky="ew", pady=2
+        )
+        ttk.Button(controls, text="Save bit schema JSON…", command=self._save_logical_schema).grid(
+            row=len(fields) + 7, column=0, columnspan=2, sticky="ew", pady=2
+        )
+
+        content = ttk.Frame(body)
+        content.grid(row=0, column=1, sticky="nsew")
+        content.columnconfigure(0, weight=1)
+        content.rowconfigure(2, weight=1)
+        self.logical_frame = ttk.LabelFrame(
+            content,
+            text="Custom digital-bit groups",
+            padding=10,
+        )
+        self.logical_frame.grid(row=0, column=0, sticky="new")
+        self.grid_frame = ttk.LabelFrame(
+            content,
+            text="Physical lattice sites — select sites for one group",
+            padding=10,
+        )
+        self.grid_frame.grid(row=1, column=0, sticky="new", pady=(10, 0))
+        self.preview = tk.Canvas(content, background="#202225", highlightthickness=0, height=430)
+        self.preview.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
+        self.preview.bind("<Configure>", lambda _event: self._draw_preview())
+        ttk.Label(self, textvariable=self.status).pack(fill="x", pady=(8, 0))
+
+    def _grid_shape(self) -> Tuple[int, int]:
+        try:
+            rows, columns = int(self.rows_var.get()), int(self.columns_var.get())
+        except ValueError as exc:
+            raise ValueError("Grid rows and columns must be whole numbers.") from exc
+        if not 1 <= rows <= 50 or not 1 <= columns <= 50:
+            raise ValueError("Grid rows and columns must be between 1 and 50.")
+        return rows, columns
+
+    def _settings(self) -> Tuple[int, int, float, float, float, float, int]:
+        rows, columns = self._grid_shape()
+        try:
+            values = (
+                rows,
+                columns,
+                float(self.spacing_x_var.get()),
+                float(self.spacing_y_var.get()),
+                float(self.margin_var.get()),
+                float(self.sigma_var.get()),
+                int(self.width_var.get()),
+            )
+        except ValueError as exc:
+            raise ValueError("Spacing, margin, sigma, and PNG width must be numeric.") from exc
+        validate_template_settings(*values)
+        return values
+
+    def _rebuild_grid(
+        self,
+        select_all: bool = False,
+        selected_sites: Optional[Set[Tuple[int, int]]] = None,
+    ) -> None:
+        try:
+            rows, columns = self._grid_shape()
+        except ValueError as exc:
+            messagebox.showerror("Invalid template grid", str(exc), parent=self)
+            return
+        old_values = {site: variable.get() for site, variable in self.site_variables.items()}
+        self._built_shape = (rows, columns)
+        for child in self.grid_frame.winfo_children():
+            child.destroy()
+        self.site_variables.clear()
+        self.site_buttons.clear()
+        requested_sites = (
+            set(selected_sites)
+            if selected_sites is not None
+            else ({(row, column) for row in range(rows) for column in range(columns)} if select_all else {
+                site for site, selected in old_values.items() if selected
+            })
+        )
+        schema = self.logical_schema
+        if schema is None or (
+            int(schema.get("physical_rows", -1)) != rows
+            or int(schema.get("physical_columns", -1)) != columns
+        ):
+            schema = empty_logical_bit_schema(rows, columns)
+            self.logical_schema = schema
+            self.selected_group_id = None
+        self._build_logical_controls(schema, schema.get("active_logical_bits", []))
+        for column in range(columns):
+            ttk.Label(self.grid_frame, text="C{}".format(column + 1), anchor="center").grid(
+                row=0, column=column + 1, padx=3, pady=(0, 4)
+            )
+        for row in range(rows):
+            ttk.Label(self.grid_frame, text="R{}".format(row + 1)).grid(row=row + 1, column=0, padx=(0, 6))
+            for column in range(columns):
+                site = (row, column)
+                selected = site in requested_sites
+                variable = tk.BooleanVar(value=selected)
+                button = tk.Button(
+                    self.grid_frame,
+                    width=5,
+                    height=2,
+                    relief="sunken" if selected else "raised",
+                    command=lambda item=site: self._toggle_site(item),
+                )
+                button.grid(row=row + 1, column=column + 1, padx=3, pady=3)
+                self.site_variables[site] = variable
+                self.site_buttons[site] = button
+                self._paint_site(site)
+        self._settings_changed()
+
+    def _build_logical_controls(
+        self,
+        schema: Optional[Dict[str, object]],
+        active_ids: Iterable[str],
+    ) -> None:
+        for child in self.logical_frame.winfo_children():
+            child.destroy()
+        self.logical_stroke_variables.clear()
+        schema = schema or empty_logical_bit_schema(*self._built_shape)
+        active = set(active_ids)
+        editor = ttk.Frame(self.logical_frame)
+        editor.grid(row=0, column=0, sticky="ew")
+        editor.columnconfigure(1, weight=1)
+        ttk.Label(editor, text="Group name").grid(row=0, column=0, sticky="w")
+        ttk.Entry(editor, textvariable=self.group_name_var, width=24).grid(row=0, column=1, sticky="ew", padx=(8, 12))
+        ttk.Label(editor, text="Role").grid(row=0, column=2, sticky="w")
+        ttk.Combobox(
+            editor,
+            textvariable=self.group_role_var,
+            values=("Digital bit", "Alignment-only"),
+            state="readonly",
+            width=16,
+        ).grid(row=0, column=3, padx=(8, 12))
+        ttk.Checkbutton(editor, text="Bit is ON in this template", variable=self.group_active_var).grid(
+            row=0, column=4, sticky="w"
+        )
+        ttk.Button(editor, text="Create from selected sites", command=self._create_group).grid(
+            row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0)
+        )
+        ttk.Button(editor, text="Update selected group", command=self._update_group).grid(
+            row=1, column=2, sticky="ew", padx=(8, 0), pady=(8, 0)
+        )
+        ttk.Button(editor, text="Delete selected group", command=self._delete_group).grid(
+            row=1, column=3, sticky="ew", padx=(8, 0), pady=(8, 0)
+        )
+        ttk.Button(editor, text="Toggle bit ON/OFF", command=self._toggle_group_active).grid(
+            row=1, column=4, sticky="ew", padx=(8, 0), pady=(8, 0)
+        )
+
+        self.group_tree = ttk.Treeview(
+            self.logical_frame,
+            columns=("color", "name", "role", "sites", "state"),
+            show="headings",
+            height=5,
+            selectmode="browse",
+        )
+        for key, label, width in (
+            ("color", "Color", 85),
+            ("name", "Group", 220),
+            ("role", "Role", 110),
+            ("sites", "Sites", 70),
+            ("state", "Template state", 110),
+        ):
+            self.group_tree.heading(key, text=label)
+            self.group_tree.column(key, width=width, anchor="w" if key == "name" else "center")
+        self.group_tree.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        self.group_tree.bind("<<TreeviewSelect>>", self._group_selected)
+        bit_ids = {str(bit["id"]) for bit in schema.get("logical_bits", [])}
+        groups = list(schema.get("alignment_groups", [])) + list(schema.get("logical_bits", []))
+        for group in groups:
+            group_id = str(group["id"])
+            is_bit = group_id in bit_ids
+            color = str(group.get("display_color", "#ffffff"))
+            self.group_tree.insert(
+                "",
+                "end",
+                iid=group_id,
+                tags=(group_id,),
+                values=(
+                    "● " + color,
+                    str(group.get("label", group_id)),
+                    "Digital bit" if is_bit else "Alignment-only",
+                    len(group.get("physical_sites", [])),
+                    ("ON" if group_id in active else "OFF") if is_bit else "Always on",
+                ),
+            )
+            self.group_tree.tag_configure(group_id, foreground=color)
+            if is_bit:
+                self.logical_stroke_variables[group_id] = tk.BooleanVar(value=group_id in active)
+        if self.selected_group_id in self.group_tree.get_children():
+            self.group_tree.selection_set(self.selected_group_id)
+
+    def _logical_strokes_changed(self) -> None:
+        if self.logical_schema is not None:
+            self.logical_schema["active_logical_bits"] = self._active_bit_ids()
+        self._settings_changed()
+
+    def _active_bit_ids(self) -> List[str]:
+        if self.logical_stroke_variables:
+            return [bit_id for bit_id, variable in self.logical_stroke_variables.items() if variable.get()]
+        if self.logical_schema is None:
+            return []
+        return [str(value) for value in self.logical_schema.get("active_logical_bits", [])]
+
+    def _all_groups(self) -> List[Dict[str, object]]:
+        if self.logical_schema is None:
+            return []
+        return list(self.logical_schema.get("alignment_groups", [])) + list(
+            self.logical_schema.get("logical_bits", [])
+        )
+
+    def _group_by_id(self, group_id: Optional[str]) -> Optional[Dict[str, object]]:
+        if group_id is None:
+            return None
+        return next((group for group in self._all_groups() if str(group.get("id")) == group_id), None)
+
+    def _group_selected(self, _event: object = None) -> None:
+        selection = self.group_tree.selection()
+        if not selection:
+            return
+        group_id = str(selection[0])
+        group = self._group_by_id(group_id)
+        if group is None or self.logical_schema is None:
+            return
+        self.selected_group_id = group_id
+        self.group_name_var.set(str(group.get("label", group_id)))
+        is_bit = any(str(bit.get("id")) == group_id for bit in self.logical_schema.get("logical_bits", []))
+        self.group_role_var.set("Digital bit" if is_bit else "Alignment-only")
+        self.group_active_var.set(
+            bool(self.logical_stroke_variables[group_id].get()) if is_bit else True
+        )
+        sites = {(int(row) - 1, int(column) - 1) for row, column in group.get("physical_sites", [])}
+        for site, variable in self.site_variables.items():
+            variable.set(site in sites)
+            self._paint_site(site)
+        self._settings_changed()
+
+    def _unique_group_id(self, label: str, existing_id: Optional[str] = None) -> str:
+        base = re.sub(r"[^a-z0-9]+", "_", label.strip().lower()).strip("_") or "bit"
+        used = {
+            str(group.get("id"))
+            for group in self._all_groups()
+            if str(group.get("id")) != existing_id
+        }
+        group_id = base
+        suffix = 2
+        while group_id in used:
+            group_id = f"{base}_{suffix}"
+            suffix += 1
+        return group_id
+
+    def _create_group(self) -> None:
+        self._store_group(create=True)
+
+    def _update_group(self) -> None:
+        self._store_group(create=False)
+
+    def _store_group(self, *, create: bool) -> None:
+        label = self.group_name_var.get().strip()
+        selected = self._selected_sites()
+        if not label or not selected:
+            messagebox.showerror(
+                "Incomplete group",
+                "Enter a group name and select at least one physical site.",
+                parent=self,
+            )
+            return
+        if not create and self.selected_group_id is None:
+            messagebox.showerror("No group selected", "Select the group you want to update.", parent=self)
+            return
+        if self.logical_schema is None:
+            self.logical_schema = empty_logical_bit_schema(*self._built_shape)
+        old_id = None if create else self.selected_group_id
+        old_group = self._group_by_id(old_id)
+        old_active = set(self._active_bit_ids())
+        if old_id is not None:
+            for key in ("alignment_groups", "logical_bits"):
+                self.logical_schema[key] = [
+                    group
+                    for group in self.logical_schema.get(key, [])
+                    if str(group.get("id")) != old_id
+                ]
+        group_id = self._unique_group_id(label, old_id)
+        group = {
+            "id": group_id,
+            "label": label,
+            "display_color": (
+                str(old_group.get("display_color"))
+                if old_group is not None
+                else logical_group_color(len(self._all_groups()))
+            ),
+            "physical_sites": [[row + 1, column + 1] for row, column in sorted(selected)],
+        }
+        is_bit = self.group_role_var.get() == "Digital bit"
+        if is_bit:
+            group["evidence_sites"] = list(group["physical_sites"])
+            self.logical_schema.setdefault("logical_bits", []).append(group)
+        else:
+            self.logical_schema.setdefault("alignment_groups", []).append(group)
+        old_active.discard(str(old_id))
+        if is_bit and self.group_active_var.get():
+            old_active.add(group_id)
+        self.logical_schema["active_logical_bits"] = sorted(old_active)
+        self.selected_group_id = group_id
+        self._build_logical_controls(self.logical_schema, old_active)
+        self._settings_changed()
+
+    def _delete_group(self) -> None:
+        if self.selected_group_id is None or self.logical_schema is None:
+            return
+        deleted = self.selected_group_id
+        active = set(self._active_bit_ids())
+        for key in ("alignment_groups", "logical_bits"):
+            self.logical_schema[key] = [
+                group
+                for group in self.logical_schema.get(key, [])
+                if str(group.get("id")) != deleted
+            ]
+        active.discard(deleted)
+        self.logical_schema["active_logical_bits"] = sorted(active)
+        self.selected_group_id = None
+        self.group_name_var.set("")
+        self._build_logical_controls(self.logical_schema, active)
+        self._settings_changed()
+
+    def _toggle_group_active(self) -> None:
+        if self.selected_group_id not in self.logical_stroke_variables or self.logical_schema is None:
+            return
+        variable = self.logical_stroke_variables[self.selected_group_id]
+        variable.set(not variable.get())
+        self.group_active_var.set(variable.get())
+        active = self._active_bit_ids()
+        self.logical_schema["active_logical_bits"] = active
+        self._build_logical_controls(self.logical_schema, active)
+        self._settings_changed()
+
+    def _load_logical_schema(self) -> None:
+        path_text = filedialog.askopenfilename(
+            title="Load logical-bit schema",
+            initialdir=str(self.initial_directory if self.initial_directory.exists() else APP_DIR),
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+        )
+        if not path_text:
+            return
+        try:
+            payload = json.loads(Path(path_text).read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("Schema JSON must contain an object.")
+            raw_schema = payload.get("logical_model", payload)
+            if not isinstance(raw_schema, dict):
+                raise ValueError("The selected file does not contain a logical-bit schema.")
+            rows = int(raw_schema.get("physical_rows"))
+            columns = int(raw_schema.get("physical_columns"))
+            loaded_active_ids = [str(value) for value in raw_schema.get("active_logical_bits", [])]
+            schema = normalize_logical_bit_schema(raw_schema, rows, columns)
+            schema["active_logical_bits"] = loaded_active_ids
+            loaded_sites = set(
+                logical_template_sites(rows, columns, loaded_active_ids, schema=schema)
+            )
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            messagebox.showerror("Invalid bit schema", str(exc), parent=self)
+            return
+        self.logical_schema = schema
+        self.rows_var.set(str(rows))
+        self.columns_var.set(str(columns))
+        self.initial_directory = Path(path_text).parent
+        self.source_name.set(
+            "Loaded arbitrary logical-bit schema {} ({} bits).".format(
+                Path(path_text).name, len(schema["logical_bits"])
+            )
+        )
+        self._rebuild_grid(select_all=False, selected_sites=loaded_sites)
+
+    def _save_logical_schema(self) -> None:
+        if self.logical_schema is None or not self.logical_schema.get("logical_bits"):
+            messagebox.showinfo(
+                "No bit schema",
+                "Create at least one digital-bit group first.",
+                parent=self,
+            )
+            return
+        path_text = filedialog.asksaveasfilename(
+            title="Save reusable logical-bit schema",
+            initialdir=str(self.initial_directory if self.initial_directory.exists() else APP_DIR),
+            initialfile="origami_logical_bits.json",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json")],
+        )
+        if not path_text:
+            return
+        try:
+            path = Path(path_text)
+            schema = normalize_logical_bit_schema(self.logical_schema, *self._built_shape)
+            path.write_text(json.dumps(schema, indent=2) + "\n", encoding="utf-8")
+            self.initial_directory = path.parent
+            self.status.set(f"Saved reusable logical-bit schema: {path}")
+        except OSError as exc:
+            messagebox.showerror("Could not save bit schema", str(exc), parent=self)
+
+    def load_replacement_panel(
+        self,
+        group: str,
+        panel: Dict[str, object],
+        selected_sites: Sequence[Tuple[int, int]],
+    ) -> None:
+        """Replace the editor state with the selected positions from one panel."""
+        rows = list(panel["rows"])
+        columns = list(panel["columns"])
+        self.rows_var.set(str(len(rows)))
+        self.columns_var.set(str(len(columns)))
+        # The replacement-sheet lattice is physical and uniformly spans
+        # 120 x 40 nm between the outer site centers of a 12 x 8 grid.
+        self.spacing_x_var.set(str(EXTENSION_COLUMN_SPACING_NM))
+        self.spacing_y_var.set(str(EXTENSION_ROW_SPACING_NM))
+        self.sigma_var.set("1.5")
+        self.logical_schema = empty_logical_bit_schema(len(rows), len(columns))
+        self.selected_group_id = None
+        self.source_name.set(
+            "Loaded {} selected site{} from {} → {} (columns {:.4g} nm; rows {:.4g} nm).".format(
+                len(selected_sites),
+                "" if len(selected_sites) == 1 else "s",
+                group,
+                panel["label"],
+                EXTENSION_COLUMN_SPACING_NM,
+                EXTENSION_ROW_SPACING_NM,
+            )
+        )
+        self._rebuild_grid(selected_sites=set(selected_sites))
+
+    def _toggle_site(self, site: Tuple[int, int]) -> None:
+        variable = self.site_variables[site]
+        variable.set(not variable.get())
+        self._paint_site(site)
+        self._settings_changed()
+
+    def _paint_site(self, site: Tuple[int, int]) -> None:
+        selected = self.site_variables[site].get()
+        row, column = site
+        self.site_buttons[site].configure(
+            text="S{} {}".format(row * self._built_shape[1] + column + 1, "✓" if selected else ""),
+            background="#51ad68" if selected else "#d5d8da",
+            activebackground="#68bd7c" if selected else "#e4e6e7",
+            foreground="#ffffff" if selected else "#555555",
+            relief="sunken" if selected else "raised",
+        )
+
+    def _selected_sites(self) -> List[Tuple[int, int]]:
+        return [site for site, variable in self.site_variables.items() if variable.get()]
+
+    def _rendered_sites(self) -> List[Tuple[int, int]]:
+        if self.logical_schema is None or not self.logical_schema.get("logical_bits"):
+            return []
+        return logical_template_sites(
+            *self._built_shape,
+            self._active_bit_ids(),
+            schema=self.logical_schema,
+        )
+
+    def _select_all(self) -> None:
+        for site, variable in self.site_variables.items():
+            variable.set(True)
+            self._paint_site(site)
+        self._settings_changed()
+
+    def _clear_all(self) -> None:
+        for site, variable in self.site_variables.items():
+            variable.set(False)
+            self._paint_site(site)
+        self._settings_changed()
+
+    def _invert(self) -> None:
+        for site, variable in self.site_variables.items():
+            variable.set(not variable.get())
+            self._paint_site(site)
+        self._settings_changed()
+
+    def _settings_changed(self) -> None:
+        try:
+            rows, columns, spacing_x, spacing_y, margin, _sigma, _width = self._settings()
+            if (rows, columns) != self._built_shape:
+                self.status.set("Grid dimensions changed — click Apply grid size before saving.")
+                return
+            width_nm, height_nm = template_size_nm(rows, columns, spacing_x, spacing_y, margin)
+            site_width_nm = (columns - 1) * spacing_x
+            site_height_nm = (rows - 1) * spacing_y
+            group_count = len(self._all_groups())
+            active_count = len(self._active_bit_ids())
+            selection_text = (
+                f"{group_count} custom groups • {active_count} digital bits ON • "
+                f"{len(self._selected_sites())} sites selected for editing"
+            )
+            self.status.set(
+                "{} • site span {:.3g} × {:.3g} nm • raster with margin {:.3g} × {:.3g} nm".format(
+                    selection_text, site_width_nm, site_height_nm, width_nm, height_nm
+                )
+            )
+        except ValueError as exc:
+            self.status.set(str(exc))
+        self._draw_preview()
+
+    def _draw_preview(self) -> None:
+        self.preview.delete("all")
+        try:
+            rows, columns, spacing_x, spacing_y, margin, sigma, _width = self._settings()
+        except ValueError:
+            return
+        width_nm, height_nm = template_size_nm(rows, columns, spacing_x, spacing_y, margin)
+        available_width = max(40, self.preview.winfo_width() - 50)
+        available_height = max(40, self.preview.winfo_height() - 50)
+        scale = min(available_width / width_nm, available_height / height_nm)
+        draw_width, draw_height = width_nm * scale, height_nm * scale
+        left = (self.preview.winfo_width() - draw_width) / 2.0
+        top = (self.preview.winfo_height() - draw_height) / 2.0
+        self.preview.create_rectangle(
+            left, top, left + draw_width, top + draw_height, fill="#000000", outline="#666b70"
+        )
+        radius = max(3.0, sigma * scale * 1.5)
+        selected = set(self._rendered_sites())
+        group_colors: Dict[Tuple[int, int], List[str]] = defaultdict(list)
+        if self.logical_schema is not None:
+            active = set(self._active_bit_ids())
+            groups = list(self.logical_schema.get("alignment_groups", [])) + [
+                bit
+                for bit in self.logical_schema.get("logical_bits", [])
+                if str(bit.get("id")) in active
+            ]
+            for group in groups:
+                color = str(group.get("display_color", "#ffffff"))
+                for group_row, group_column in group.get("physical_sites", []):
+                    group_colors[(int(group_row) - 1, int(group_column) - 1)].append(color)
+        for row in range(rows):
+            for column in range(columns):
+                x = left + (margin + column * spacing_x) * scale
+                y = top + (margin + row * spacing_y) * scale
+                if (row, column) in selected:
+                    colors = group_colors.get((row, column), ["#fff3a0"])
+                    components = [
+                        tuple(int(color[index : index + 2], 16) for index in (1, 3, 5))
+                        for color in colors
+                    ]
+                    blended = "#{:02x}{:02x}{:02x}".format(
+                        *(max(component[channel] for component in components) for channel in range(3))
+                    )
+                    self.preview.create_oval(
+                        x - radius,
+                        y - radius,
+                        x + radius,
+                        y + radius,
+                        fill=blended,
+                        outline="#ffffff",
+                    )
+                else:
+                    self.preview.create_oval(
+                        x - 3, y - 3, x + 3, y + 3, fill="", outline="#596169"
+                    )
+        self.preview.create_text(
+            left + 8,
+            top + draw_height - 8,
+            text="site span {:.3g} × {:.3g} nm; raster {:.3g} × {:.3g} nm".format(
+                (columns - 1) * spacing_x,
+                (rows - 1) * spacing_y,
+                width_nm,
+                height_nm,
+            ),
+            fill="#aeb5ba",
+            anchor="sw",
+        )
+
+    def _save(self) -> None:
+        try:
+            settings = self._settings()
+            if settings[:2] != self._built_shape:
+                raise ValueError("Click Apply grid size after changing the row or column count.")
+            if self.logical_schema is None or not self.logical_schema.get("logical_bits"):
+                raise ValueError("Create at least one digital-bit group before saving a template.")
+            selected = self._rendered_sites()
+            if not selected:
+                raise ValueError("Turn on a digital bit or create an alignment-only group before saving.")
+        except ValueError as exc:
+            messagebox.showerror("Cannot save template", str(exc), parent=self)
+            return
+        initial_directory = self.initial_directory if self.initial_directory.exists() else APP_DIR
+        path = filedialog.asksaveasfilename(
+            title="Save origami barcode template",
+            initialdir=str(initial_directory),
+            initialfile="origami_barcode_template.png",
+            defaultextension=".png",
+            filetypes=[("PNG image", "*.png")],
+        )
+        if not path:
+            return
+        try:
+            png_path, metadata_path, metadata = save_barcode_template(
+                Path(path),
+                settings[0],
+                settings[1],
+                selected,
+                settings[2],
+                settings[3],
+                settings[4],
+                settings[5],
+                settings[6],
+                self._active_bit_ids(),
+                self.logical_schema,
+            )
+            self.initial_directory = png_path.parent
+            self.status.set(
+                "Saved {}-site template: {} (metadata: {})".format(
+                    metadata["selected_site_count"], png_path, metadata_path.name
+                )
+            )
+            messagebox.showinfo(
+                "Template saved",
+                "Upload this image as the custom origami template:\n{}\n\n"
+                "Its nm-per-pixel calibration is embedded in the PNG and also saved here:\n{}".format(
+                    png_path, metadata_path
+                ),
+                parent=self,
+            )
+        except Exception as exc:
+            messagebox.showerror("Could not save template", str(exc), parent=self)
+
+
 class PicklistApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -556,19 +1403,38 @@ class PicklistApp(tk.Tk):
         main_tabs = ttk.Notebook(self)
         main_tabs.pack(fill="both", expand=True, padx=12, pady=(0, 8))
         replacement_page = ttk.Frame(main_tabs)
+        template_page = ttk.Frame(main_tabs)
         settings_page = ttk.Frame(main_tabs)
         plate_page = ttk.Frame(main_tabs)
         storage_page = ttk.Frame(main_tabs)
         preview_page = ttk.Frame(main_tabs)
         main_tabs.add(replacement_page, text="1. Replacements")
-        main_tabs.add(settings_page, text="2. Run & Mixing Settings")
-        main_tabs.add(plate_page, text="3. Destination Plate")
-        main_tabs.add(storage_page, text="4. Storage")
-        main_tabs.add(preview_page, text="5. Results")
+        main_tabs.add(template_page, text="2. Origami Templates")
+        main_tabs.add(settings_page, text="3. Run & Mixing Settings")
+        main_tabs.add(plate_page, text="4. Destination Plate")
+        main_tabs.add(storage_page, text="5. Storage")
+        main_tabs.add(preview_page, text="6. Results")
         self.main_tabs = main_tabs
         self.replacement_page = replacement_page
+        self.template_page = template_page
+
+        configured_output = Path(str(self.config.get("output_root_path", OUTPUT_DIR))).expanduser()
+        if not configured_output.is_absolute():
+            configured_output = APP_DIR / configured_output
+        self.template_view = OrigamiTemplateView(template_page, configured_output)
+        self.template_view.pack(fill="both", expand=True)
 
         self._build_compatibility_footer(replacement_page)
+        hinge_controls = ttk.Frame(replacement_page, padding=(12, 8))
+        hinge_controls.pack(side="top", fill="x")
+        self.hinge_type = tk.StringVar(
+            value=HINGE_TYPES.get(str(self.config.get("hinge_type", "original")), HINGE_TYPES["original"])
+        )
+        ttk.Label(hinge_controls, text="Hinge type").pack(side="left", padx=(0, 8))
+        ttk.Combobox(
+            hinge_controls, textvariable=self.hinge_type,
+            values=list(HINGE_TYPES.values()), state="readonly", width=38,
+        ).pack(side="left")
         set_tabs = ttk.Notebook(replacement_page)
         set_tabs.pack(side="top", fill="both", expand=True)
         for title, filename, plate_name, panels in panel_definitions():
@@ -582,6 +1448,7 @@ class PicklistApp(tk.Tk):
                     plate_name,
                     panels,
                     selection_changed=self._selections_changed,
+                    template_requested=self._make_template_from_panel,
                 )
             )
 
@@ -600,6 +1467,15 @@ class PicklistApp(tk.Tk):
         self._bind_config_updates()
         self._refresh_plate_view()
         self.protocol("WM_DELETE_WINDOW", self._close_app)
+
+    def _make_template_from_panel(
+        self,
+        group: str,
+        panel: Dict[str, object],
+        selected_sites: Sequence[Tuple[int, int]],
+    ) -> None:
+        self.template_view.load_replacement_panel(group, panel, selected_sites)
+        self.main_tabs.select(self.template_page)
 
     def _build_compatibility_footer(self, page: ttk.Frame) -> None:
         footer = ttk.LabelFrame(page, text="Selection compatibility", padding=8)
@@ -650,7 +1526,7 @@ class PicklistApp(tk.Tk):
                 continue
             for panel in view.panels:
                 rows = [str(value) for value in panel["rows"]]
-                columns = [str(value) for value in panel["columns"]]
+                columns = [str(value) for value in panel_display_columns(panel)]
                 configured = panel.get("active")
                 active = {
                     (row, column)
@@ -676,6 +1552,9 @@ class PicklistApp(tk.Tk):
                             "active": sorted(active),
                             "selected": selected,
                             "selected_names": names,
+                            "spacing_x_nm": panel.get("spacing_x_nm"),
+                            "spacing_y_nm": panel.get("spacing_y_nm"),
+                            "mirror_columns": bool(panel.get("mirror_columns", False)),
                         }
                     )
         return panels
@@ -809,6 +1688,7 @@ class PicklistApp(tk.Tk):
             self.transfers_per_source,
             self.transfer_volume,
             self.max_volume,
+            self.hinge_type,
         )
         for variable in variables:
             variable.trace_add("write", lambda *_args: self._schedule_config_save())
@@ -829,6 +1709,7 @@ class PicklistApp(tk.Tk):
                 "pending_destination_wells": normalize_recent_wells(self.destination_wells.get().split(",")),
                 "destination_plate_name": self.destination_plate.get().strip() or "Destination[1]",
                 "source_plate_type": self.source_plate_type.get().strip(),
+                "hinge_type": self._selected_hinge_type(),
             }
         )
         for key, variable, converter in (
@@ -927,7 +1808,6 @@ class PicklistApp(tk.Tk):
         self.picklist_path = self._field(pick, 8, "Latest picklist path", str(self._restore_path("save_picklist_path", OUTPUT_DIR / "picklist_combined.csv")))
         self.starting_well = self._field(pick, 9, "Destination starting well", "")
         ttk.Button(pick, text="Start here", command=self._apply_starting_well).grid(row=9, column=2, sticky="w", padx=6, pady=4)
-
         mix = ttk.LabelFrame(page, text="Mixing recipe", padding=10)
         mix.grid(row=1, column=0, sticky="new", padx=14, pady=6)
         mix.columnconfigure(1, weight=1)
@@ -1122,6 +2002,7 @@ class PicklistApp(tk.Tk):
             "created_utc": datetime.now(timezone.utc).isoformat(),
             "run_name": run_name,
             "design_names": list(self.last_design_names),
+            "hinge_type": self.last_hinge_type,
             "selection_panels": [dict(panel) for panel in selection_panels],
             "destination_plate_name": destination_plate,
             "destination_wells": destination_wells,
@@ -1383,6 +2264,9 @@ class PicklistApp(tk.Tk):
         frame.columnconfigure(0, weight=1)
         return tree
 
+    def _selected_hinge_type(self) -> str:
+        return next(key for key, label in HINGE_TYPES.items() if label == self.hinge_type.get())
+
     def generate(self, tabs: ttk.Notebook, preview_page: ttk.Frame) -> None:
         try:
             if not self.check_selections():
@@ -1404,6 +2288,7 @@ class PicklistApp(tk.Tk):
                 Path(self.base_path.get()), selections, valid_well_list(self.destination_wells.get()),
                 self.source_plate_type.get().strip(), self.destination_plate.get().strip(),
                 transfer_volume, float(self.max_volume.get()), transfers_per_source,
+                hinge_type=self._selected_hinge_type(),
             )
             unique_sources = {(str(row["Source Plate Name"]), str(row["Source Well"])) for row in picklist}
             available_ul = len(unique_sources) * transfer_volume * transfers_per_source / 1000.0
@@ -1418,6 +2303,7 @@ class PicklistApp(tk.Tk):
                 raise ValueError("Requested staple volume ({:.3f} µL) exceeds picklist availability ({:.3f} µL).".format(requested_ul, available_ul))
             self.last_picklist, self.last_mix = picklist, mixing
             self.last_design_names = design_names
+            self.last_hinge_type = self._selected_hinge_type()
             self.last_selection_panels = self._replacement_selection_panels()
             self.last_run_id = uuid4().hex
             self.last_run_committed = False
@@ -1427,6 +2313,7 @@ class PicklistApp(tk.Tk):
             self._fill_tree(self.pick_tree, picklist[:500], PICKLIST_COLUMNS)
             self._fill_tree(self.mix_tree, mixing, ("Reagent", "Volume_uL"))
             self.summary.set("{} transfers • {} unique staples • {:.3f} µL available • {:.3f} µL requested".format(len(picklist), len(unique_sources), available_ul, requested_ul))
+            self.summary.set(self.summary.get() + " • " + HINGE_TYPES[self.last_hinge_type])
             self.status.set("Preview ready — choose Save picklist + recipe or Send to storage")
             tabs.select(preview_page)
         except Exception as exc:

@@ -19,6 +19,11 @@ PICKLIST_COLUMNS = [
     "Transfer Volume",
 ]
 
+HINGE_TYPES = {
+    "original": "Flexible hinges (original wells)",
+    "balanced_rigid": "Rigid center connectors (F19–H24)",
+}
+
 
 @dataclass(frozen=True)
 class ReplacementSelection:
@@ -75,8 +80,10 @@ def _find_column(columns: Sequence[str], candidates: Sequence[str]) -> Optional[
     return None
 
 
-def parse_source1(path: Path) -> Tuple[List[Dict[str, str]], str]:
+def parse_source1(path: Path, hinge_type: str = "original") -> Tuple[List[Dict[str, str]], str]:
     """Parse the base plate, preserving logical replacement keys for relocated staples."""
+    if hinge_type not in HINGE_TYPES:
+        raise ValueError("Unknown hinge type: {}".format(hinge_type))
     rows = _read_rows(Path(path))
     header_index = _header_index(rows, ("WELL POSITION", "SEQUENCE NAME"))
     records = _dict_rows(rows, header_index)
@@ -95,6 +102,11 @@ def parse_source1(path: Path) -> Tuple[List[Dict[str, str]], str]:
     by_replacement_key: Dict[str, Dict[str, str]] = {}
     key_order: List[str] = []
     for row in records:
+        row_hinge_type = row.get("Hinge Type", "")
+        if row_hinge_type and row_hinge_type not in HINGE_TYPES:
+            raise ValueError("Unknown hinge type in base CSV: {}".format(row_hinge_type))
+        if row_hinge_type and row_hinge_type != hinge_type:
+            continue
         well = row.get(well_column, "").upper()
         if not well:
             continue
@@ -172,6 +184,7 @@ def generate_picklist(
     transfer_volume_nl: int = 50,
     max_destination_volume_ul: float = 12.5,
     transfers_per_source: int = 1,
+    hinge_type: str = "original",
 ) -> List[Dict[str, object]]:
     """Apply replacements and build Echo-format transfer rows."""
     destinations = [_clean(well).upper() for well in destination_wells if _clean(well)]
@@ -180,7 +193,7 @@ def generate_picklist(
     if transfer_volume_nl <= 0 or max_destination_volume_ul <= 0 or transfers_per_source <= 0:
         raise ValueError("Transfer volume, destination capacity, and transfers/source must be positive.")
 
-    base_rows, base_plate_name = parse_source1(Path(base_source_path))
+    base_rows, base_plate_name = parse_source1(Path(base_source_path), hinge_type)
     selected_replacements: List[Dict[str, str]] = []
     targets: Dict[str, Tuple[Path, str]] = {}
 

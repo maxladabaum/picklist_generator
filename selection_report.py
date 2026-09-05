@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import math
 from pathlib import Path
 from textwrap import wrap
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -13,6 +14,20 @@ PAGE_HEIGHT = 612
 MARGIN = 24
 CARD_GAP = 12
 CARD_WIDTH = 366
+
+
+def _grid_metrics(panel: Dict[str, object]) -> Tuple[float, float, float, float]:
+    """Return x/y center pitch and marker width/height for a panel grid."""
+    columns = list(panel.get("columns", []))  # type: ignore[arg-type]
+    column_pitch = min(24.0, 288.0 / max(1, len(columns)))
+    spacing_x = panel.get("spacing_x_nm")
+    spacing_y = panel.get("spacing_y_nm")
+    if spacing_x is not None and spacing_y is not None:
+        x_nm, y_nm = float(spacing_x), float(spacing_y)
+        if x_nm > 0 and y_nm > 0:
+            row_pitch = column_pitch * y_nm / x_nm
+            return column_pitch, row_pitch, min(10.0, column_pitch * 0.55), min(8.0, row_pitch * 0.7)
+    return column_pitch, 20.0, max(4.0, column_pitch - 3.0), 16.0
 
 
 def _pdf_text(value: object) -> str:
@@ -46,7 +61,8 @@ def _card_height(panel: Dict[str, object]) -> int:
     rows = list(panel.get("rows", []))  # type: ignore[arg-type]
     names = [str(value) for value in panel.get("selected_names", [])]  # type: ignore[union-attr]
     name_lines = wrap(", ".join(names), width=56, break_long_words=False) or [""]
-    return 76 + len(rows) * 20 + len(name_lines) * 12
+    _column_pitch, row_pitch, _marker_width, marker_height = _grid_metrics(panel)
+    return int(math.ceil(76 + len(rows) * row_pitch + marker_height + len(name_lines) * 12))
 
 
 def _layout_pages(
@@ -105,28 +121,29 @@ def _page_commands(
         commands.append(_text(card_x + 12, card_y + 20, "{} - {}".format(group, label), 12, True, (0.09, 0.13, 0.17)))
         commands.append(_text(card_x + 12, card_y + 36, "{} selected".format(len(selected)), 8, False, (0.32, 0.38, 0.43)))
 
-        cell_width = min(24, int(288 / max(1, len(columns))))
-        cell_height = 16
+        column_pitch, row_pitch, marker_width, marker_height = _grid_metrics(panel)
         grid_x = card_x + 54
         grid_y = card_y + 45
         for column_index, column in enumerate(columns):
-            x = grid_x + column_index * cell_width
-            commands.append(_text(x + cell_width / 2 - 4, grid_y + 8, column, 6, False, (0.32, 0.38, 0.43)))
+            center_x = grid_x + (column_index + 0.5) * column_pitch
+            commands.append(_text(center_x - 4, grid_y + 8, column, 6, False, (0.32, 0.38, 0.43)))
         for row_index, row in enumerate(rows):
-            top = grid_y + 11 + row_index * 20
-            commands.append(_text(grid_x - 34, top + 11, row, 7, False, (0.32, 0.38, 0.43)))
+            center_y = grid_y + 16 + row_index * row_pitch
+            top = center_y - marker_height / 2
+            commands.append(_text(grid_x - 34, center_y + 3, row, 7, False, (0.32, 0.38, 0.43)))
             for column_index, column in enumerate(columns):
                 position = (row, column)
-                x = grid_x + column_index * cell_width
+                center_x = grid_x + (column_index + 0.5) * column_pitch
+                x = center_x - marker_width / 2
                 if position in selected:
                     fill, stroke = (0.21, 0.66, 0.36), (0.09, 0.45, 0.23)
                 elif position in active:
                     fill, stroke = (1, 1, 1), (0.60, 0.65, 0.69)
                 else:
                     fill, stroke = (0.85, 0.87, 0.89), (0.72, 0.75, 0.78)
-                commands.append(_rect(x + 1, top, cell_width - 3, cell_height, fill, stroke))
+                commands.append(_rect(x, top, marker_width, marker_height, fill, stroke))
 
-        names_top = grid_y + 18 + len(rows) * 20
+        names_top = grid_y + 24 + len(rows) * row_pitch
         commands.append(_text(card_x + 12, names_top, "Selected replacements:", 8, True))
         for line_index, line in enumerate(name_lines, 1):
             commands.append(_text(card_x + 12, names_top + line_index * 11, line, 7))

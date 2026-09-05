@@ -1,0 +1,42 @@
+{
+  "format": "paint-analysis-logical-bits-v1",
+  "description": "Example arbitrary encoding: edit the grid size, groups, and one-based site coordinates.",
+  "physical_rows": 4,
+  "physical_columns": 6,
+  "alignment_groups": [
+    {
+      "id": "anchor",
+      "label": "Alignment anchor",
+      "physical_sites": [
+        [1, 1],
+        [1, 2],
+        [2, 1]
+      ]
+    }
+  ],
+  "logical_bits": [
+    {
+      "id": "bit_a",
+      "label": "Bit A",
+      "physical_sites": [
+        [2, 3],
+        [2, 4],
+        [2, 5]
+      ],
+      "evidence_sites": [
+        [2, 3],
+        [2, 4],
+        [2, 5]
+      ]
+    },
+    {
+      "id": "bit_b",
+      "label": "Bit B",
+      "physical_sites": [
+        [3, 2],
+        [3, 3],
+        [4, 3]
+      ]
+    }
+  ]
+}

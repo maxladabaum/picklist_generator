@@ -1,4 +1,5 @@
 {
+  "hinge_type": "original",
   "destination_plate_name": "Destination[1]",
   "max_destination_volume_uL": 12.5,
   "output_root_path": "generated_output",
