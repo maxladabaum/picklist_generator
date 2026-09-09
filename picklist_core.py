@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +31,7 @@ class ReplacementSelection:
     csv_path: Path
     selected_names: Sequence[str]
     plate_name: str
+    excess_multiplier: float = 1.0
 
 
 def _clean(value: object) -> str:
@@ -136,7 +138,7 @@ def parse_source2(path: Path) -> Tuple[List[Dict[str, str]], str]:
         columns, ("Sequence", "Sequence with spaces", "Sequence (5' > 3')")
     )
     replacement_column = _find_column(
-        columns, ("Replace Well", "Replacement Well", "replace_well", "replacewell")
+        columns, ("Replace Well", "Replacement Well", "replace_well", "replacewell", "Replace")
     )
     if not all((well_column, name_column, sequence_column, replacement_column)):
         raise ValueError(
@@ -194,10 +196,12 @@ def generate_picklist(
         raise ValueError("Transfer volume, destination capacity, and transfers/source must be positive.")
 
     base_rows, base_plate_name = parse_source1(Path(base_source_path), hinge_type)
-    selected_replacements: List[Dict[str, str]] = []
+    selected_replacements: List[Dict[str, object]] = []
     targets: Dict[str, Tuple[Path, str]] = {}
 
     for selection in replacements:
+        if not math.isfinite(selection.excess_multiplier) or selection.excess_multiplier <= 0:
+            raise ValueError("Excess Multiplier must be a finite positive number: {}".format(selection.csv_path))
         replacement_rows, file_plate_name = parse_source2(Path(selection.csv_path))
         plate_name = _clean(selection.plate_name) or file_plate_name
         for row in _selected_rows(replacement_rows, selection.selected_names):
@@ -215,6 +219,7 @@ def generate_picklist(
                     "Well": row["Well"],
                     "Sequence": row["Sequence"],
                     "Source Plate Name": plate_name,
+                    "Transfer Volume": transfer_volume_nl * selection.excess_multiplier,
                 }
             )
 
@@ -234,23 +239,25 @@ def generate_picklist(
                     "Source Plate Type": source_plate_type,
                     "Source Well": source["Well"].upper(),
                     "Sample Comments": source["Sequence"],
+                    "Transfer Volume": source.get("Transfer Volume", transfer_volume_nl),
                 }
             )
 
-    capacity = int(max_destination_volume_ul * 1000) // transfer_volume_nl
-    if capacity < 1:
-        raise ValueError("Transfer volume is larger than the destination-well capacity.")
-    total_capacity = capacity * len(destinations)
-    if len(transfers) > total_capacity:
-        raise ValueError(
-            "Too many transfers ({}) for the destination wells (maximum {}).".format(
-                len(transfers), total_capacity
-            )
-        )
-    for index, transfer in enumerate(transfers):
+    capacity_nl = max_destination_volume_ul * 1000
+    destination_index = 0
+    used_nl = 0.0
+    for transfer in transfers:
+        volume_nl = transfer["Transfer Volume"]
+        if volume_nl > capacity_nl + 1e-9:
+            raise ValueError("Transfer volume is larger than the destination-well capacity.")
+        if used_nl + volume_nl > capacity_nl + 1e-9:
+            destination_index += 1
+            used_nl = 0.0
+        if destination_index >= len(destinations):
+            raise ValueError("Too many transfers for the destination wells at the requested volumes.")
         transfer["Destination Plate Name"] = destination_plate_name
-        transfer["Destination Well"] = destinations[index // capacity]
-        transfer["Transfer Volume"] = transfer_volume_nl
+        transfer["Destination Well"] = destinations[destination_index]
+        used_nl += volume_nl
     return transfers
 
 
@@ -266,7 +273,7 @@ def parse_vector(text: str, length: int, label: str) -> List[float]:
 
 def calculate_mixing_volumes(
     staple: Sequence[float],
-    number_of_staples: int,
+    number_of_staples: float,
     scaffold: Sequence[float],
     magnesium: Sequence[float],
     sodium: Sequence[float],

@@ -18,6 +18,23 @@ the picklist. Targets B21, B22, and B20 are translated to logical replacement
 keys B11, B14, and L14, respectively, to account for relocated base staples.
 These selections participate in the existing clash checks, previews, and storage.
 
+Each replacement tab has an **Excess Multiplier**, initially **1**, also editable
+in **Run & Mixing Settings**. Values are independent per tab and stay synchronized
+between the two locations. For example, PAINT R1 at **5** with a **25 nL** transfer
+volume produces **125 nL** transfers for its selected replacements. Base staples
+keep the normal transfer volume. Positive decimal multipliers are supported.
+Destination capacity, available volume, and the mixing recipe account for the
+scaled transfers; the desired staple concentration refers to the nominal 1× staples.
+
+**miRNA** loads `replacement_sheets/miRNA_replace.csv` from the supplied Source [3]
+anchor sheet, using `Well` as the source well and `Replace` as the base replacement
+key. The source plate is `SourcePlate3[3]`. Its two 8×12 panels infer sites from
+the name suffix: `p1_H3-3` is H03, column 03, and `p2_H3-1` is H03, column 01.
+Both panels contain anchors at H03, H05, H07, H09, H11, and H13, with columns
+displayed 1 through 12. Names, sequences, wells, and replacement targets are
+preserved from the CSV. Toehold Lock and miR-21-DNA lack replacement targets
+and are excluded. Both H03 anchors target M13, so selecting both is a clash.
+
 In **Replacements**, choose **Hinge type**: **Flexible hinges (original
 wells)** (the default) or **Rigid center connectors (F19–H24)**. Each option includes 18 hinges and
 excludes the other set. The choice is remembered and recorded with stored runs.
@@ -76,6 +93,12 @@ Destination Plate tab to clear all recorded usage for the currently named
 plate after confirmation. Existing output folders are retained.
 
 ## Workflow
+
+**Run & Mixing Settings** starts greyed out. Select replacements and click the
+large green **Make Picklist** button at the bottom of Replacements to check for
+clashes and open the settings. Empty or conflicting selections keep settings
+locked. Changing selections or a replacement CSV locks settings again until
+you click **Make Picklist** and pass the check.
 
 1. Open **Replacements** and select wells in Yaritza Extensions, Aptamers, MB,
    PAINT P1, or PAINT R1. Grey wells do not have a corresponding

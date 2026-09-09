@@ -120,6 +120,7 @@ class SetView:
     ) -> None:
         self.title = title
         self.path_var = tk.StringVar(value=str(csv_path))
+        self.excess_multiplier = tk.StringVar(value="1")
         self.plate_name = plate_name
         self.variables: Dict[str, tk.BooleanVar] = {}
         self.buttons: Dict[str, tk.Checkbutton] = {}
@@ -139,6 +140,10 @@ class SetView:
         ttk.Entry(toolbar, textvariable=self.path_var).pack(side="left", fill="x", expand=True, padx=8)
         ttk.Button(toolbar, text="Browse…", command=self._browse).pack(side="left")
         ttk.Button(toolbar, text="Clear set", command=self.clear).pack(side="left", padx=(8, 0))
+        excess_bar = ttk.Frame(scroll.inner)
+        excess_bar.pack(fill="x", padx=12, pady=4)
+        ttk.Label(excess_bar, text="Excess Multiplier").pack(side="left")
+        ttk.Entry(excess_bar, textvariable=self.excess_multiplier, width=8).pack(side="left", padx=8)
         panel_bar = ttk.Frame(scroll.inner)
         panel_bar.pack(fill="x", padx=12, pady=(5, 2))
         ttk.Label(panel_bar, text="Panel:").pack(side="left")
@@ -472,6 +477,28 @@ def soyeon_mb_panels() -> List[Dict[str, object]]:
     return panels
 
 
+def mirna_panels() -> List[Dict[str, object]]:
+    """Infer anchor sites from the H<helix>-<column> suffix, preserving CSV names."""
+    records, _ = parse_source2(SHEET_DIR / "miRNA_replace.csv")
+    panels = []
+    for group, label in (("p1", "p1 — Lock 3′ anchors"), ("p2", "p2 — Direct 5′ anchors")):
+        names = {}
+        for record in records:
+            match = re.search(r"_" + group + r"_H(\d+)-(\d+)$", record["Name"])
+            if match:
+                helix, column = map(int, match.groups())
+                site = ("H{:02d}".format(helix), "{:02d}".format(column))
+                if site[0] not in ROWS or site[1] not in COLS:
+                    raise ValueError("miRNA anchor is outside the 8×12 grid: {}".format(record["Name"]))
+                if site in names:
+                    raise ValueError("Duplicate miRNA grid position: {}".format(record["Name"]))
+                names[site] = record["Name"]
+        panel = dense_panel(label, active=set(names))
+        panel["sequence_names"] = names
+        panels.append(panel)
+    return panels
+
+
 def panel_definitions() -> List[Tuple[str, str, str, List[Dict[str, object]]]]:
     set_d = {
         ("H01", "01"), ("H01", "12"), ("H05", "04"), ("H05", "09"),
@@ -509,6 +536,7 @@ def panel_definitions() -> List[Tuple[str, str, str, List[Dict[str, object]]]]:
         ),
         ("Aptamers", "max_replace.csv", "SourcePlate4[4]", c_panels),
         ("Soyeon MB", "soyeon_MB_replace.csv", "SoyeonMB[1]", soyeon_mb_panels()),
+        ("miRNA", "miRNA_replace.csv", "SourcePlate3[3]", mirna_panels()),
         (
             "MB",
             "max_replace_MB.csv",
@@ -658,7 +686,7 @@ class OrigamiTemplateView(ttk.Frame):
         super().__init__(parent, padding=12)
         self.initial_directory = Path(initial_directory)
         self.site_variables: Dict[Tuple[int, int], tk.BooleanVar] = {}
-        self.site_buttons: Dict[Tuple[int, int], tk.Button] = {}
+        self.site_buttons: Dict[Tuple[int, int], ttk.Button] = {}
         self.logical_stroke_variables: Dict[str, tk.BooleanVar] = {}
         self.logical_schema: Optional[Dict[str, object]] = empty_logical_bit_schema(8, 12)
         self.selected_group_id: Optional[str] = None
@@ -679,6 +707,18 @@ class OrigamiTemplateView(ttk.Frame):
         self._rebuild_grid(select_all=False)
 
     def _build(self) -> None:
+        style = ttk.Style(self)
+        for name, background, foreground in (
+            ("Lattice.TButton", "#e8edf1", "#35424e"),
+            ("SelectedLattice.TButton", "#126b35", "#ffffff"),
+        ):
+            style.configure(name, background=background, foreground=foreground,
+                            font=("TkDefaultFont", 11, "bold"), padding=(3, 2),
+                            borderwidth=3, relief="raised")
+            style.map(name, background=[("pressed", background), ("active", background)],
+                      foreground=[("pressed", foreground), ("active", foreground)])
+        style.map("BitGroups.Treeview", background=[("selected", "#164f86")],
+                  foreground=[("selected", "#ffffff")])
         ttk.Label(
             self,
             text="Build a barcode image for Origami → Identify Origami → Custom template.",
@@ -686,24 +726,54 @@ class OrigamiTemplateView(ttk.Frame):
         ).pack(fill="x")
         ttk.Label(
             self,
-            text=(
-                "Create your own groups: select physical sites, name the group, and choose Digital bit or Alignment-only. "
-                "The colored PNG shows group membership; its embedded JSON tells Paint Analysis how to classify the bits. "
-                "The replacement panels and template preview use the same physical "
-                "{:.4g} nm × {:.4g} nm pitch (120 nm × 40 nm between outer site centers). "
-                "Keep the PNG free of borders and labels when editing it elsewhere."
-            ).format(EXTENSION_COLUMN_SPACING_NM, EXTENSION_ROW_SPACING_NM),
-            wraplength=1100,
-        ).pack(fill="x", pady=(3, 10))
+            text="Select lattice sites on the right, then create or update a group on the left.",
+        ).pack(fill="x", pady=(3, 6))
         ttk.Label(self, textvariable=self.source_name, foreground="#3d626f").pack(fill="x", pady=(0, 8))
+        ttk.Label(self, textvariable=self.status, wraplength=880).pack(side="bottom", fill="x", pady=(8, 0))
 
-        body = ttk.Frame(self)
-        body.pack(fill="both", expand=True)
+        file_actions = ttk.Frame(self)
+        file_actions.pack(fill="x", pady=(0, 6))
+        for label, command in (("Save template PNG…", self._save),
+                               ("Load bit schema JSON…", self._load_logical_schema),
+                               ("Save bit schema JSON…", self._save_logical_schema)):
+            ttk.Button(file_actions, text=label, command=command).pack(side="left", padx=(0, 6))
+
+        self.editor_split = tk.PanedWindow(
+            self, orient="vertical", sashwidth=8, sashrelief="raised",
+            borderwidth=0, background="#d4d8dc",
+        )
+        self.editor_split.pack(fill="both", expand=True)
+        editor_host = ttk.Frame(self.editor_split)
+        self.editor_split.add(editor_host, minsize=140, stretch="always")
+        editor_host.rowconfigure(0, weight=1)
+        editor_host.columnconfigure(0, weight=1)
+        self.editor_canvas = tk.Canvas(editor_host, highlightthickness=0, height=380)
+        self.editor_canvas.grid(row=0, column=0, sticky="nsew")
+        ybar = ttk.Scrollbar(editor_host, orient="vertical", command=self.editor_canvas.yview)
+        ybar.grid(row=0, column=1, sticky="ns")
+        xbar = ttk.Scrollbar(editor_host, orient="horizontal", command=self.editor_canvas.xview)
+        xbar.grid(row=1, column=0, sticky="ew")
+        self.editor_canvas.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
+        body = ttk.Frame(self.editor_canvas)
+        editor_window = self.editor_canvas.create_window(0, 0, window=body, anchor="nw")
+
+        def resize_editor(_event=None):
+            self.editor_canvas.itemconfigure(
+                editor_window, width=max(body.winfo_reqwidth(), self.editor_canvas.winfo_width())
+            )
+            self.editor_canvas.configure(scrollregion=self.editor_canvas.bbox("all"))
+
+        body.bind("<Configure>", resize_editor)
+        self.editor_canvas.bind("<Configure>", resize_editor)
         body.columnconfigure(1, weight=1)
         body.rowconfigure(0, weight=1)
 
-        controls = ttk.LabelFrame(body, text="Template geometry", padding=10)
-        controls.grid(row=0, column=0, sticky="nsw", padx=(0, 10))
+        left_tabs = ttk.Notebook(body)
+        left_tabs.grid(row=0, column=0, sticky="ns", padx=(0, 10))
+        self.logical_frame = ttk.Frame(left_tabs, padding=8)
+        controls = ttk.Frame(left_tabs, padding=10)
+        left_tabs.add(self.logical_frame, text="Custom digital-bit groups")
+        left_tabs.add(controls, text="Geometry")
         fields = (
             ("Grid rows", self.rows_var),
             ("Grid columns", self.columns_var),
@@ -722,46 +792,40 @@ class OrigamiTemplateView(ttk.Frame):
         ttk.Button(controls, text="Apply grid size", command=self._rebuild_grid).grid(
             row=len(fields), column=0, columnspan=2, sticky="ew", pady=(8, 3)
         )
-        ttk.Separator(controls).grid(row=len(fields) + 1, column=0, columnspan=2, sticky="ew", pady=8)
-        ttk.Button(controls, text="Select all sites", command=self._select_all).grid(
-            row=len(fields) + 2, column=0, columnspan=2, sticky="ew", pady=2
-        )
-        ttk.Button(controls, text="Clear site selection", command=self._clear_all).grid(
-            row=len(fields) + 3, column=0, columnspan=2, sticky="ew", pady=2
-        )
-        ttk.Button(controls, text="Invert site selection", command=self._invert).grid(
-            row=len(fields) + 4, column=0, columnspan=2, sticky="ew", pady=2
-        )
-        ttk.Button(controls, text="Save template PNG…", command=self._save).grid(
-            row=len(fields) + 5, column=0, columnspan=2, sticky="ew", pady=(12, 2)
-        )
-        ttk.Button(controls, text="Load bit schema JSON…", command=self._load_logical_schema).grid(
-            row=len(fields) + 6, column=0, columnspan=2, sticky="ew", pady=2
-        )
-        ttk.Button(controls, text="Save bit schema JSON…", command=self._save_logical_schema).grid(
-            row=len(fields) + 7, column=0, columnspan=2, sticky="ew", pady=2
-        )
-
         content = ttk.Frame(body)
         content.grid(row=0, column=1, sticky="nsew")
         content.columnconfigure(0, weight=1)
-        content.rowconfigure(2, weight=1)
-        self.logical_frame = ttk.LabelFrame(
-            content,
-            text="Custom digital-bit groups",
-            padding=10,
-        )
-        self.logical_frame.grid(row=0, column=0, sticky="new")
+        site_actions = ttk.Frame(content)
+        site_actions.grid(row=0, column=0, sticky="ew")
+        for label, command in (("Select all", self._select_all),
+                               ("Clear selection", self._clear_all), ("Invert selection", self._invert)):
+            ttk.Button(site_actions, text=label, command=command).pack(side="left", padx=(0, 6))
+        self.site_selection_summary = tk.StringVar()
+        ttk.Label(
+            content, textvariable=self.site_selection_summary, foreground="#125c30",
+            font=("TkDefaultFont", 10, "bold"), padding=(4, 4),
+        ).grid(row=1, column=0, sticky="ew")
         self.grid_frame = ttk.LabelFrame(
             content,
             text="Physical lattice sites — select sites for one group",
-            padding=10,
+            padding=6,
         )
-        self.grid_frame.grid(row=1, column=0, sticky="new", pady=(10, 0))
-        self.preview = tk.Canvas(content, background="#202225", highlightthickness=0, height=430)
-        self.preview.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
+        self.grid_frame.grid(row=2, column=0, sticky="new")
+        preview_host = ttk.LabelFrame(
+            self.editor_split, text="Digital bit group preview — drag the divider above to resize", padding=4,
+        )
+        self.editor_split.add(preview_host, minsize=230, stretch="always")
+        self.preview = tk.Canvas(preview_host, background="#202225", highlightthickness=0, height=280)
+        self.preview.pack(fill="both", expand=True)
         self.preview.bind("<Configure>", lambda _event: self._draw_preview())
-        ttk.Label(self, textvariable=self.status).pack(fill="x", pady=(8, 0))
+
+        def keep_preview_visible(_event=None):
+            height = self.editor_split.winfo_height()
+            if height > 390:
+                x, y = self.editor_split.sash_coord(0)
+                self.editor_split.sash_place(0, x, max(140, min(body.winfo_reqheight() + 16, height - 250)))
+
+        self.editor_split.bind("<Configure>", lambda _event: self.after_idle(keep_preview_visible))
 
     def _grid_shape(self) -> Tuple[int, int]:
         try:
@@ -831,14 +895,13 @@ class OrigamiTemplateView(ttk.Frame):
                 site = (row, column)
                 selected = site in requested_sites
                 variable = tk.BooleanVar(value=selected)
-                button = tk.Button(
+                button = ttk.Button(
                     self.grid_frame,
-                    width=5,
-                    height=2,
-                    relief="sunken" if selected else "raised",
+                    width=4,
+                    style="SelectedLattice.TButton" if selected else "Lattice.TButton",
                     command=lambda item=site: self._toggle_site(item),
                 )
-                button.grid(row=row + 1, column=column + 1, padx=3, pady=3)
+                button.grid(row=row + 1, column=column + 1, padx=2, pady=2)
                 self.site_variables[site] = variable
                 self.site_buttons[site] = button
                 self._paint_site(site)
@@ -859,29 +922,23 @@ class OrigamiTemplateView(ttk.Frame):
         editor.columnconfigure(1, weight=1)
         ttk.Label(editor, text="Group name").grid(row=0, column=0, sticky="w")
         ttk.Entry(editor, textvariable=self.group_name_var, width=24).grid(row=0, column=1, sticky="ew", padx=(8, 12))
-        ttk.Label(editor, text="Role").grid(row=0, column=2, sticky="w")
+        ttk.Label(editor, text="Role").grid(row=1, column=0, sticky="w", pady=4)
         ttk.Combobox(
-            editor,
-            textvariable=self.group_role_var,
-            values=("Digital bit", "Alignment-only"),
-            state="readonly",
-            width=16,
-        ).grid(row=0, column=3, padx=(8, 12))
+            editor, textvariable=self.group_role_var,
+            values=("Digital bit", "Alignment-only"), state="readonly", width=16,
+        ).grid(row=1, column=1, sticky="ew", padx=(8, 12), pady=4)
         ttk.Checkbutton(editor, text="Bit is ON in this template", variable=self.group_active_var).grid(
-            row=0, column=4, sticky="w"
+            row=2, column=0, columnspan=2, sticky="w"
         )
-        ttk.Button(editor, text="Create from selected sites", command=self._create_group).grid(
-            row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0)
-        )
-        ttk.Button(editor, text="Update selected group", command=self._update_group).grid(
-            row=1, column=2, sticky="ew", padx=(8, 0), pady=(8, 0)
-        )
-        ttk.Button(editor, text="Delete selected group", command=self._delete_group).grid(
-            row=1, column=3, sticky="ew", padx=(8, 0), pady=(8, 0)
-        )
-        ttk.Button(editor, text="Toggle bit ON/OFF", command=self._toggle_group_active).grid(
-            row=1, column=4, sticky="ew", padx=(8, 0), pady=(8, 0)
-        )
+        for row, buttons in enumerate((
+            (("Create group", self._create_group), ("Update group", self._update_group)),
+            (("Delete group", self._delete_group), ("Toggle bit ON/OFF", self._toggle_group_active)),
+        ), start=3):
+            for column, (label, command) in enumerate(buttons):
+                ttk.Button(editor, text=label, command=command).grid(
+                    row=row, column=column, sticky="ew", padx=2, pady=3,
+                )
+        self.logical_frame.columnconfigure(0, weight=1)
 
         self.group_tree = ttk.Treeview(
             self.logical_frame,
@@ -889,17 +946,21 @@ class OrigamiTemplateView(ttk.Frame):
             show="headings",
             height=5,
             selectmode="browse",
+            style="BitGroups.Treeview",
         )
         for key, label, width in (
-            ("color", "Color", 85),
-            ("name", "Group", 220),
-            ("role", "Role", 110),
-            ("sites", "Sites", 70),
-            ("state", "Template state", 110),
+            ("color", "Color", 60),
+            ("name", "Group", 105),
+            ("role", "Role", 85),
+            ("sites", "Sites", 40),
+            ("state", "State", 65),
         ):
             self.group_tree.heading(key, text=label)
             self.group_tree.column(key, width=width, anchor="w" if key == "name" else "center")
-        self.group_tree.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        self.group_tree.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        group_scroll = ttk.Scrollbar(self.logical_frame, orient="vertical", command=self.group_tree.yview)
+        group_scroll.grid(row=1, column=1, sticky="ns", pady=(6, 0))
+        self.group_tree.configure(yscrollcommand=group_scroll.set)
         self.group_tree.bind("<<TreeviewSelect>>", self._group_selected)
         bit_ids = {str(bit["id"]) for bit in schema.get("logical_bits", [])}
         groups = list(schema.get("alignment_groups", [])) + list(schema.get("logical_bits", []))
@@ -1173,11 +1234,8 @@ class OrigamiTemplateView(ttk.Frame):
         selected = self.site_variables[site].get()
         row, column = site
         self.site_buttons[site].configure(
-            text="S{} {}".format(row * self._built_shape[1] + column + 1, "✓" if selected else ""),
-            background="#51ad68" if selected else "#d5d8da",
-            activebackground="#68bd7c" if selected else "#e4e6e7",
-            foreground="#ffffff" if selected else "#555555",
-            relief="sunken" if selected else "raised",
+            text="{}S{}".format("✓ " if selected else "", row * self._built_shape[1] + column + 1),
+            style="SelectedLattice.TButton" if selected else "Lattice.TButton",
         )
 
     def _selected_sites(self) -> List[Tuple[int, int]]:
@@ -1211,6 +1269,11 @@ class OrigamiTemplateView(ttk.Frame):
         self._settings_changed()
 
     def _settings_changed(self) -> None:
+        group = self._group_by_id(self.selected_group_id)
+        group_label = "Editing: {}".format(group.get("label", self.selected_group_id)) if group else "New group"
+        self.site_selection_summary.set(
+            "{} • {} sites selected • ✓ Green = selected for editing".format(group_label, len(self._selected_sites()))
+        )
         try:
             rows, columns, spacing_x, spacing_y, margin, _sigma, _width = self._settings()
             if (rows, columns) != self._built_shape:
@@ -1394,6 +1457,10 @@ class PicklistApp(tk.Tk):
             style.theme_use("clam")
         style.configure("Title.TLabel", font=("TkDefaultFont", 18, "bold"))
         style.configure("Generate.TButton", font=("TkDefaultFont", 11, "bold"), padding=8)
+        style.configure("MakePicklist.TButton", font=("TkDefaultFont", 16, "bold"),
+                        padding=(24, 14), background="#218739", foreground="#ffffff")
+        style.map("MakePicklist.TButton", background=[("pressed", "#146329"), ("active", "#2a9b46")],
+                  foreground=[("active", "#ffffff")])
 
     def _build(self) -> None:
         header = ttk.Frame(self, padding=(14, 10))
@@ -1410,12 +1477,13 @@ class PicklistApp(tk.Tk):
         preview_page = ttk.Frame(main_tabs)
         main_tabs.add(replacement_page, text="1. Replacements")
         main_tabs.add(template_page, text="2. Origami Templates")
-        main_tabs.add(settings_page, text="3. Run & Mixing Settings")
+        main_tabs.add(settings_page, text="3. Run & Mixing Settings", state="disabled")
         main_tabs.add(plate_page, text="4. Destination Plate")
         main_tabs.add(storage_page, text="5. Storage")
         main_tabs.add(preview_page, text="6. Results")
         self.main_tabs = main_tabs
         self.replacement_page = replacement_page
+        self.settings_page = settings_page
         self.template_page = template_page
 
         configured_output = Path(str(self.config.get("output_root_path", OUTPUT_DIR))).expanduser()
@@ -1424,6 +1492,11 @@ class PicklistApp(tk.Tk):
         self.template_view = OrigamiTemplateView(template_page, configured_output)
         self.template_view.pack(fill="both", expand=True)
 
+        self.make_picklist_button = ttk.Button(
+            replacement_page, text="Make Picklist", style="MakePicklist.TButton",
+            command=self._make_picklist,
+        )
+        self.make_picklist_button.pack(side="bottom", fill="x", padx=12, pady=(6, 12))
         self._build_compatibility_footer(replacement_page)
         hinge_controls = ttk.Frame(replacement_page, padding=(12, 8))
         hinge_controls.pack(side="top", fill="x")
@@ -1452,6 +1525,8 @@ class PicklistApp(tk.Tk):
                 )
             )
 
+        for view in self.set_views:
+            view.path_var.trace_add("write", lambda *_args: self._selections_changed())
         self._build_settings(settings_page, main_tabs, preview_page)
         plate_actions = ttk.Frame(plate_page, padding=(12, 10, 12, 0))
         plate_actions.pack(fill="x")
@@ -1596,10 +1671,28 @@ class PicklistApp(tk.Tk):
         self.clash_text.configure(state="disabled")
 
     def _selections_changed(self) -> None:
+        self._lock_run_settings()
         for view in self.set_views:
             view.mark_conflicts(set())
         self.compatibility_status.configure(text="Selections changed — check again", foreground="#8a5a00")
         self._set_clash_text("Compatibility results are out of date. Click Check selections to run the check again.")
+
+    def _lock_run_settings(self) -> None:
+        if self.main_tabs.select() == str(self.settings_page):
+            self.main_tabs.select(self.replacement_page)
+        self.main_tabs.tab(self.settings_page, state="disabled")
+
+    def _make_picklist(self) -> None:
+        """Open run settings only after selected replacements pass the clash check."""
+        self._lock_run_settings()
+        if not self.check_selections():
+            return
+        if not any(view.selected() for view in self.set_views):
+            self.compatibility_status.configure(text="No replacements selected", foreground="#a40000")
+            self._set_clash_text("Select at least one replacement, then click Make Picklist.")
+            return
+        self.main_tabs.tab(self.settings_page, state="normal")
+        self.main_tabs.select(self.settings_page)
 
     def check_selections(self) -> bool:
         """Highlight selections that replace the same base well and list every clash."""
@@ -1611,6 +1704,10 @@ class PicklistApp(tk.Tk):
                 if not selected_names:
                     continue
                 rows, _plate_name = parse_source2(Path(view.path_var.get()))
+                missing = selected_names - {row["Name"] for row in rows}
+                if missing:
+                    raise ValueError("{}: selected replacements are missing from the CSV: {}".format(
+                        view.title, ", ".join(sorted(missing))))
                 for row in rows:
                     name = row["Name"]
                     if name in selected_names:
@@ -1789,6 +1886,9 @@ class PicklistApp(tk.Tk):
         self.destroy()
 
     def _build_settings(self, page: ttk.Frame, tabs: ttk.Notebook, preview_page: ttk.Frame) -> None:
+        scroll = ScrollFrame(page)
+        scroll.pack(fill="both", expand=True)
+        page = scroll.inner
         page.columnconfigure(0, weight=1)
         pick = ttk.LabelFrame(page, text="Picklist", padding=10)
         pick.grid(row=0, column=0, sticky="new", padx=14, pady=10)
@@ -1808,6 +1908,13 @@ class PicklistApp(tk.Tk):
         self.picklist_path = self._field(pick, 8, "Latest picklist path", str(self._restore_path("save_picklist_path", OUTPUT_DIR / "picklist_combined.csv")))
         self.starting_well = self._field(pick, 9, "Destination starting well", "")
         ttk.Button(pick, text="Start here", command=self._apply_starting_well).grid(row=9, column=2, sticky="w", padx=6, pady=4)
+        excess = ttk.LabelFrame(pick, text="Excess Multiplier (per replacement tab)", padding=4)
+        excess.grid(row=10, column=0, columnspan=3, sticky="ew", pady=4)
+        for index, view in enumerate(self.set_views):
+            field = ttk.Frame(excess)
+            field.grid(row=index // 3, column=index % 3, sticky="w", padx=8, pady=2)
+            ttk.Label(field, text=view.title).pack(side="left")
+            ttk.Entry(field, textvariable=view.excess_multiplier, width=6).pack(side="left", padx=6)
         mix = ttk.LabelFrame(page, text="Mixing recipe", padding=10)
         mix.grid(row=1, column=0, sticky="new", padx=14, pady=6)
         mix.columnconfigure(1, weight=1)
@@ -2278,7 +2385,11 @@ class PicklistApp(tk.Tk):
             for view in self.set_views:
                 names = view.selected()
                 if names:
-                    selections.append(ReplacementSelection(Path(view.path_var.get()), names, view.plate_name))
+                    try:
+                        multiplier = float(view.excess_multiplier.get())
+                    except ValueError:
+                        raise ValueError("{} Excess Multiplier must be a positive number.".format(view.title))
+                    selections.append(ReplacementSelection(Path(view.path_var.get()), names, view.plate_name, multiplier))
                     design_names.extend(names)
             if not selections:
                 raise ValueError("Select at least one replacement.")
@@ -2291,9 +2402,13 @@ class PicklistApp(tk.Tk):
                 hinge_type=self._selected_hinge_type(),
             )
             unique_sources = {(str(row["Source Plate Name"]), str(row["Source Well"])) for row in picklist}
-            available_ul = len(unique_sources) * transfer_volume * transfers_per_source / 1000.0
+            total_volume_nl = sum(float(row["Transfer Volume"]) for row in picklist)
+            available_ul = total_volume_nl / 1000.0
+            # Count each replacement in proportion to its excess so the nominal
+            # staple concentration is maintained when diluting the pooled mix.
+            effective_staples = total_volume_nl / (transfer_volume * transfers_per_source)
             mixing = calculate_mixing_volumes(
-                parse_vector(self.staple.get(), 4, "Staple"), len(unique_sources),
+                parse_vector(self.staple.get(), 4, "Staple"), effective_staples,
                 parse_vector(self.scaffold.get(), 4, "Scaffold"),
                 parse_vector(self.magnesium.get(), 4, "Mg"), parse_vector(self.sodium.get(), 4, "Na"),
                 parse_vector(self.te_10x.get(), 4, "10X TE"), parse_vector(self.desired.get(), 6, "Desired"),

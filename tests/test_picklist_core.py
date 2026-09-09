@@ -34,7 +34,7 @@ from template_generator import (
     save_barcode_template,
     template_size_nm,
 )
-from picklist_app import COLS, panel_definitions, panel_display_columns, panel_template_positions, panel_sequence_name, soyeon_mb_panels
+from picklist_app import COLS, panel_definitions, panel_display_columns, panel_template_positions, panel_sequence_name, soyeon_mb_panels, mirna_panels
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,6 +42,95 @@ SHEETS = ROOT / "replacement_sheets"
 
 
 class PicklistCoreTests(unittest.TestCase):
+    def test_mirna_panels_infer_all_anchor_positions(self):
+        records, _ = parse_source2(SHEETS / "miRNA_replace.csv")
+        panels = mirna_panels()
+        self.assertEqual(len(records), 12)
+        self.assertEqual([len(panel["active"]) for panel in panels], [6, 6])
+        self.assertTrue(all(len(panel["rows"]) == 8 and len(panel["columns"]) == 12 for panel in panels))
+        names = {panel_sequence_name(panel, row, column)
+                 for panel in panels for row, column in panel["active"]}
+        self.assertEqual(names, {record["Name"] for record in records})
+        for panel, prefix, column in ((panels[0], "Lock-3'Ach1_p1", 3), (panels[1], "Dir-5'Anch1_p2", 1)):
+            for row_index, helix in enumerate(range(3, 14, 2), start=1):
+                name = "{}_H{}-{}".format(prefix, helix, column)
+                self.assertEqual(panel_template_positions(panel, {name}), [(row_index, column - 1)])
+        self.assertIn(("miRNA", "miRNA_replace.csv", "SourcePlate3[3]", panels), panel_definitions())
+
+    def test_mirna_preserves_source_wells_and_replaces_csv_targets(self):
+        records, _ = parse_source2(SHEETS / "miRNA_replace.csv")
+        base, base_plate = parse_source1(SHEETS / "book_base.csv")
+        for record in records:
+            with self.subTest(name=record["Name"]):
+                rows = generate_picklist(
+                    SHEETS / "book_base.csv",
+                    [ReplacementSelection(SHEETS / "miRNA_replace.csv", [record["Name"]], "SourcePlate3[3]", 5)],
+                    ["A01", "A02"], transfer_volume_nl=25,
+                )
+                self.assertEqual(len(rows), len(base))
+                replaced_well = next(row["Well"] for row in base if row["Replacement Well"] == record["Replace Well"])
+                self.assertFalse(any(row["Source Plate Name"] == base_plate and row["Source Well"] == replaced_well for row in rows))
+                anchor = [row for row in rows if row["Source Plate Name"] == "SourcePlate3[3]"]
+                self.assertEqual(len(anchor), 1)
+                self.assertEqual(anchor[0]["Source Well"], record["Well"])
+                self.assertEqual(anchor[0]["Sample Comments"], record["Sequence"])
+                self.assertEqual(anchor[0]["Transfer Volume"], 125)
+
+    def test_mirna_shared_m13_target_is_a_clash(self):
+        with self.assertRaisesRegex(ValueError, "Duplicate replacement for M13"):
+            generate_picklist(
+                SHEETS / "book_base.csv",
+                [ReplacementSelection(SHEETS / "miRNA_replace.csv", ["Lock-3'Ach1_p1_H3-3", "Dir-5'Anch1_p2_H3-1"], "SourcePlate3[3]")],
+                ["A01", "A02"],
+            )
+
+    def _excess_picklist(self, multipliers=(5, 2), destinations=("A01", "A02"), capacity=0.15, repeats=1):
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder) / "base.csv"
+            base.write_text("Well Position,Sequence Name,Sequence\nA01,one,AAA\nA02,two,CCC\nA03,three,GGG\n")
+            replacement = Path(folder) / "replacement.csv"
+            replacement.write_text("Well,Name,Sequence,Replace Well\nB01,R1,TTT,A01\nB02,P1,ATA,A02\n")
+            selections = [
+                ReplacementSelection(replacement, [name], "Shared plate", **({} if multiplier is None else {"excess_multiplier": multiplier}))
+                for name, multiplier in zip(("R1", "P1"), multipliers)
+            ]
+            return generate_picklist(base, selections, destinations, transfer_volume_nl=25,
+                                     max_destination_volume_ul=capacity, transfers_per_source=repeats)
+
+    def test_excess_multipliers_are_independent_and_respect_capacity(self):
+        rows = self._excess_picklist()
+        self.assertEqual([row["Transfer Volume"] for row in rows], [25, 125, 50])
+        self.assertEqual([row["Destination Well"] for row in rows], ["A01", "A01", "A02"])
+
+    def test_default_excess_multiplier_keeps_standard_volume(self):
+        rows = self._excess_picklist(multipliers=(None, None))
+        self.assertEqual([row["Transfer Volume"] for row in rows], [25, 25, 25])
+
+    def test_fractional_excess_applies_to_every_repeat(self):
+        rows = self._excess_picklist(multipliers=(1.5, 2), capacity=1, repeats=2)
+        self.assertEqual([row["Transfer Volume"] for row in rows], [25, 25, 37.5, 37.5, 50, 50])
+
+    def test_invalid_excess_is_rejected(self):
+        for multiplier in (0, -1, float("nan"), float("inf")):
+            with self.subTest(multiplier=multiplier), self.assertRaisesRegex(ValueError, "Excess Multiplier"):
+                self._excess_picklist(multipliers=(multiplier, 1))
+
+    def test_excess_cannot_overfill_destination_wells(self):
+        with self.assertRaisesRegex(ValueError, "Too many transfers"):
+            self._excess_picklist(destinations=("A01",))
+        with self.assertRaisesRegex(ValueError, "larger than"):
+            self._excess_picklist(multipliers=(7, 1))
+
+    def test_mixing_uses_weighted_staple_count_for_excess(self):
+        rows = self._excess_picklist(multipliers=(1.5, 2), capacity=1)
+        effective_staples = sum(row["Transfer Volume"] for row in rows) / 25
+        recipe = calculate_mixing_volumes(
+            [200000, 1, 0, 0], effective_staples, [400, 0.1, 0, 0], [0, 0, 100, 0],
+            [0, 0, 0, 100], [0, 10, 0, 0], [500, 10, 1, 1, 12, 5],
+        )
+        self.assertAlmostEqual(recipe[0]["Volume_uL"], 0.1125)
+        self.assertAlmostEqual(sum(row["Volume_uL"] for row in recipe), 500)
+
     def test_soyeon_panels_expose_all_supplied_extensions(self):
         records, _ = parse_source2(SHEETS / "soyeon_MB_replace.csv")
         panels = soyeon_mb_panels()
