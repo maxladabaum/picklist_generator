@@ -25,10 +25,10 @@ GROUP_COLORS = (
     "#8bd450",
     "#cf6fff",
 )
-# Uniform 12 x 8 lattice pitches whose outer site centers span the measured
-# 120 x 35 nm origami footprint. Blank export margin is handled separately.
-EXTENSION_COLUMN_SPACING_NM = 120.0 / 11.0
-EXTENSION_ROW_SPACING_NM = 35.0 / 7.0
+# Base lattice pitches; the schema stores the extra gap between columns 6 and 7.
+EXTENSION_COLUMN_SPACING_NM = 9.9
+EXTENSION_ROW_SPACING_NM = 5.1
+EXTENSION_EXTRA_COLUMN_GAP_NM = 10.0
 
 
 def empty_logical_bit_schema(rows: int, columns: int) -> Dict[str, object]:
@@ -163,6 +163,11 @@ def normalize_logical_bit_schema(
         raise ValueError("Unsupported logical-bit schema format.")
     if int(schema.get("physical_rows", -1)) != rows or int(schema.get("physical_columns", -1)) != columns:
         raise ValueError("Logical-bit schema dimensions do not match the physical grid.")
+
+    offsets = schema.get("column_offsets_nm")
+    if offsets is not None:
+        if len(offsets) != columns or not all(math.isfinite(float(value)) for value in offsets):
+            raise ValueError("Column offsets must contain one finite value per column.")
 
     all_used_ids: set[str] = set()
     next_color_index = 0
@@ -313,6 +318,18 @@ def template_size_nm(
     return width_nm, height_nm
 
 
+def template_column_positions(columns: int, spacing_x_nm: float, logical_schema: Dict[str, object] | None = None) -> List[float]:
+    """Return left-to-right site positions, including schema-defined gaps."""
+    offsets = [float(value) for value in (logical_schema or {}).get("column_offsets_nm", [0.0] * columns)]
+    if len(offsets) != columns or not all(math.isfinite(value) for value in offsets):
+        raise ValueError("Column offsets must contain one finite value per column.")
+    column_positions = [column * spacing_x_nm + offsets[column] for column in range(columns)]
+    if any(right <= left for left, right in zip(column_positions, column_positions[1:])):
+        raise ValueError("Column positions must be strictly increasing.")
+    column_positions = [value - column_positions[0] for value in column_positions]
+    return column_positions
+
+
 def render_barcode_template(
     rows: int,
     columns: int,
@@ -340,7 +357,10 @@ def render_barcode_template(
     if not selected:
         raise ValueError("Select at least one barcode site before saving a template.")
 
+    column_positions = template_column_positions(columns, spacing_x_nm, logical_schema)
+    offsets = list((logical_schema or {}).get("column_offsets_nm", [0.0] * columns))
     width_nm, height_nm = template_size_nm(rows, columns, spacing_x_nm, spacing_y_nm, margin_nm)
+    width_nm = column_positions[-1] + 2.0 * margin_nm
     height_px = max(1, int(round(width_px * height_nm / width_nm)))
     if height_px > 4096:
         raise ValueError("Computed image height exceeds 4096 pixels; reduce the image width.")
@@ -375,7 +395,7 @@ def render_barcode_template(
 
     sites = []
     for row, column in selected:
-        x_nm = margin_nm + column * spacing_x_nm
+        x_nm = margin_nm + column_positions[column]
         y_nm = margin_nm + row * spacing_y_nm
         center_x = x_nm * (width_px - 1) / width_nm
         center_y = y_nm * (height_px - 1) / height_nm
@@ -418,6 +438,7 @@ def render_barcode_template(
         "description": "Bright expected localization sites on a dark background.",
         "rows": rows,
         "columns": columns,
+        "column_offsets_nm": offsets,
         "spacing_x_nm": spacing_x_nm,
         "spacing_y_nm": spacing_y_nm,
         "margin_nm": margin_nm,

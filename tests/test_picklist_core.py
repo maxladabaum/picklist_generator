@@ -31,10 +31,11 @@ from template_generator import (
     logical_template_sites,
     normalize_logical_bit_schema,
     render_barcode_template,
+    template_column_positions,
     save_barcode_template,
     template_size_nm,
 )
-from picklist_app import COLS, panel_definitions, panel_display_columns, panel_template_positions, panel_sequence_name, soyeon_mb_panels, mirna_panels
+from picklist_app import panel_circle_centers, nearest_panel_site, dense_panel, COLS, panel_definitions, panel_display_columns, panel_template_positions, panel_sequence_name, soyeon_mb_panels, mirna_panels
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,6 +43,49 @@ SHEETS = ROOT / "replacement_sheets"
 
 
 class PicklistCoreTests(unittest.TestCase):
+    def test_replacement_circles_match_mirrored_template_geometry(self):
+        panel = dense_panel("U", mirror_columns=True)
+        sites = panel_circle_centers(panel)
+        self.assertEqual(len(sites), 96)
+        self.assertEqual(sites[0][0], panel_sequence_name(panel, "H01", "12"))
+        self.assertEqual(sites[5][0], panel_sequence_name(panel, "H01", "07"))
+        self.assertEqual(sites[6][0], panel_sequence_name(panel, "H01", "06"))
+        self.assertAlmostEqual(sites[1][1] - sites[0][1], 9.9)
+        self.assertAlmostEqual(sites[6][1] - sites[5][1], 19.9)
+        self.assertAlmostEqual(sites[-1][1] - sites[0][1], 118.9)
+        self.assertAlmostEqual(sites[-1][2], 35.7)
+        for index, (name, _, _) in enumerate(sites):
+            self.assertEqual(panel_template_positions(panel, [name]), [divmod(index, 12)])
+
+    def test_overlapping_circles_select_nearest_center(self):
+        sites = [("first", 0, 0, True), ("second", 0, 5.1, True),
+                 ("unavailable", 9.9, 0, False)]
+        self.assertEqual(nearest_panel_site(sites, 0, 1), "first")
+        self.assertEqual(nearest_panel_site(sites, 0, 4), "second")
+        self.assertIsNone(nearest_panel_site(sites, 9, 0))
+        self.assertIsNone(nearest_panel_site(sites, -8, 0))
+
+
+    def test_preview_column_positions_match_exported_gap_geometry(self):
+        schema = {
+            "format": "paint-analysis-logical-bits-v1",
+            "physical_rows": 8, "physical_columns": 12,
+            "column_offsets_nm": [0.0] * 6 + [10.0] * 6,
+            "alignment_groups": [],
+            "logical_bits": [{"id": "pair", "physical_sites": [[1, 6], [1, 7]]}],
+        }
+        positions = template_column_positions(12, 9.9, schema)
+        self.assertAlmostEqual(positions[6] - positions[5], 9.9 + 10)
+        self.assertAlmostEqual(positions[-1], 118.9)
+        _, _, _, metadata = render_barcode_template(
+            8, 12, [(0, 5), (0, 6)], logical_schema=schema,
+            active_logical_bits=["pair"],
+        )
+        self.assertAlmostEqual(metadata["width_nm"], 158.9)
+        for site, column in zip(metadata["selected_sites"], (5, 6)):
+            self.assertAlmostEqual(site["x_nm"], 20 + positions[column])
+        self.assertEqual(metadata["logical_model"]["column_offsets_nm"], schema["column_offsets_nm"])
+
     def test_mirna_panels_infer_all_anchor_positions(self):
         records, _ = parse_source2(SHEETS / "miRNA_replace.csv")
         panels = mirna_panels()
@@ -229,9 +273,9 @@ class PicklistCoreTests(unittest.TestCase):
         self.assertEqual(panel_display_columns(panels_by_label["U-PAINT"]), list(reversed(COLS)))
         self.assertEqual(panel_display_columns(panels_by_label["U-Apt R1"]), list(reversed(COLS)))
         column_pitch, row_pitch, _width, _height = _grid_metrics(panels_by_label["U-Apt R1"])
-        self.assertAlmostEqual(panels_by_label["U-Apt R1"]["spacing_x_nm"], 120.0 / 11.0)
-        self.assertAlmostEqual(panels_by_label["U-Apt R1"]["spacing_y_nm"], 35.0 / 7.0)
-        self.assertAlmostEqual(column_pitch / row_pitch, (120.0 / 11.0) / (35.0 / 7.0))
+        self.assertAlmostEqual(panels_by_label["U-Apt R1"]["spacing_x_nm"], 9.9)
+        self.assertAlmostEqual(panels_by_label["U-Apt R1"]["spacing_y_nm"], 5.1)
+        self.assertAlmostEqual(column_pitch / row_pitch, (9.9) / (5.1))
 
     def test_up_extension_template_uses_mirrored_view_coordinates(self):
         panels_by_label = {
@@ -263,18 +307,18 @@ class PicklistCoreTests(unittest.TestCase):
             EXTENSION_ROW_SPACING_NM,
             20.0,
         )
-        self.assertAlmostEqual(width_nm, 160.0)
-        self.assertAlmostEqual(height_nm, 75.0)
+        self.assertAlmostEqual(width_nm, 148.9)
+        self.assertAlmostEqual(height_nm, 75.7)
         width, height, pixels, metadata = render_barcode_template(
             8, 12, {(0, 0), (3, 6), (7, 11)}
         )
-        self.assertEqual((width, height), (500, 234))
+        self.assertEqual((width, height), (500, 254))
         self.assertEqual(len(pixels), width * height)
         self.assertEqual(metadata["selected_site_count"], 3)
-        self.assertAlmostEqual(metadata["width_nm"], 160.0)
-        self.assertAlmostEqual(metadata["height_nm"], 75.0)
-        self.assertAlmostEqual(metadata["pixel_size_x_nm"], 160.0 / 499.0)
-        self.assertAlmostEqual(metadata["pixel_size_y_nm"], 75.0 / 233.0)
+        self.assertAlmostEqual(metadata["width_nm"], 148.9)
+        self.assertAlmostEqual(metadata["height_nm"], 75.7)
+        self.assertAlmostEqual(metadata["pixel_size_x_nm"], 148.9 / 499.0)
+        self.assertAlmostEqual(metadata["pixel_size_y_nm"], 75.7 / 253.0)
         self.assertGreaterEqual(max(pixels), 250)
         self.assertEqual(pixels[0], 0)
 

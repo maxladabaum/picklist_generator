@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import json
+import math
 import re
 import subprocess
 import sys
@@ -45,6 +46,7 @@ from picklist_core import (
 from selection_report import write_replacement_selection_pdf, write_stored_runs_selection_pdf
 from template_generator import (
     EXTENSION_COLUMN_SPACING_NM,
+    EXTENSION_EXTRA_COLUMN_GAP_NM,
     EXTENSION_ROW_SPACING_NM,
     empty_logical_bit_schema,
     logical_group_color,
@@ -52,6 +54,7 @@ from template_generator import (
     normalize_logical_bit_schema,
     save_barcode_template,
     template_size_nm,
+    template_column_positions,
     validate_template_settings,
 )
 
@@ -124,6 +127,10 @@ class SetView:
         self.plate_name = plate_name
         self.variables: Dict[str, tk.BooleanVar] = {}
         self.buttons: Dict[str, tk.Checkbutton] = {}
+        self.circle_sites = {}
+        self.circle_radius_nm = 2.5
+        self.circle_radius_var = tk.StringVar(value="2.5")
+        self.circle_radius_error = tk.StringVar()
         self.color_frames: Dict[str, tk.Frame] = {}
         self.selectable: Dict[str, bool] = {}
         self.available: Set[str] = set()
@@ -174,13 +181,34 @@ class SetView:
             legend.pack(fill="x", padx=12, pady=(4, 2))
             self._legend_square(legend, self.SELECTABLE_BG, "").pack(side="left")
             tk.Label(legend, text=" Selectable", background="#f0f0f0").pack(side="left", padx=(0, 14))
-            self._legend_square(legend, self.SELECTED_BG, "✓", foreground="white").pack(side="left")
+            self._legend_square(legend, "#00ffff" if any(panel.get("spacing_x_nm") is not None for panel in self.panels) else self.SELECTED_BG, "✓", foreground="#222222").pack(side="left")
             tk.Label(legend, text=" Selected", background="#f0f0f0").pack(side="left", padx=(0, 14))
             self._legend_square(legend, self.UNAVAILABLE_BG, "×", foreground="#62676b").pack(side="left")
             tk.Label(legend, text=" Not selectable", background="#f0f0f0").pack(side="left")
+        if any(panel.get("spacing_x_nm") is not None for panel in self.panels):
+            radius_bar = ttk.Frame(scroll.inner)
+            radius_bar.pack(fill="x", padx=12, pady=4)
+            ttk.Label(radius_bar, text="Circle radius (nm)").pack(side="left")
+            ttk.Spinbox(radius_bar, from_=0.1, to=50.0, increment=0.5,
+                        textvariable=self.circle_radius_var, width=8).pack(side="left", padx=8)
+            ttk.Label(radius_bar, textvariable=self.circle_radius_error,
+                      foreground="#a40000").pack(side="left")
         self.panel_host = ttk.Frame(scroll.inner)
         self.panel_host.pack(fill="both", expand=True, padx=10, pady=6)
         self.refresh()
+        self.circle_radius_var.trace_add("write", self._circle_radius_changed)
+
+    def _circle_radius_changed(self, *_args):
+        try:
+            radius = float(self.circle_radius_var.get())
+            if not math.isfinite(radius) or radius <= 0 or radius > 50:
+                raise ValueError
+        except ValueError:
+            self.circle_radius_error.set("Enter a radius greater than 0 and at most 50 nm.")
+            return
+        self.circle_radius_error.set("")
+        self.circle_radius_nm = radius
+        self._show_panel()
 
     def _browse(self) -> None:
         path = filedialog.askopenfilename(title="Choose replacement CSV", filetypes=[("CSV files", "*.csv")])
@@ -191,6 +219,7 @@ class SetView:
     def refresh(self) -> None:
         self.variables.clear()
         self.buttons.clear()
+        self.circle_sites.clear()
         self.color_frames.clear()
         self.selectable.clear()
         self.conflicts.clear()
@@ -218,6 +247,7 @@ class SetView:
         for child in self.panel_host.winfo_children():
             child.destroy()
         self.buttons.clear()
+        self.circle_sites.clear()
         self.color_frames.clear()
         panel = self._current_panel()
         pitch = "{:.4g} nm columns; {:.4g} nm rows".format(
@@ -230,6 +260,8 @@ class SetView:
             orientation = "D physical orientation: {} (1 → 12)".format(pitch)
         else:
             orientation = "Columns shown in listed order"
+        if panel.get("spacing_x_nm") is not None:
+            orientation += "; extra C6–C7 gap: {:g} nm; circle radius: {:g} nm".format(EXTENSION_EXTRA_COLUMN_GAP_NM, self.circle_radius_nm)
         self.orientation_summary.set(orientation)
         self._build_panel(panel, self.available)
         self._update_selection_summary()
@@ -262,6 +294,9 @@ class SetView:
         spacing_x_nm = panel.get("spacing_x_nm")
         spacing_y_nm = panel.get("spacing_y_nm")
         physical_layout = spacing_x_nm is not None and spacing_y_nm is not None
+        if physical_layout:
+            self._build_physical_panel(frame, panel, available)
+            return
         unavailable_in_panel = []
 
         header_row = 0
@@ -342,6 +377,52 @@ class SetView:
                 foreground="#666666",
             ).grid(row=header_row + len(rows) + 1, column=0, columnspan=len(columns) + 1, sticky="w", padx=5, pady=3)
 
+    def _build_physical_panel(self, frame, panel, available):
+        # Use one scale for both axes; overlapping masks remain independently
+        # selectable by choosing the nearest site center on a click.
+        scale, radius = 6.0, self.circle_radius_nm
+        columns = panel_display_columns(panel)
+        rows = list(panel["rows"])
+        sites = panel_circle_centers(panel)
+        left, top = 40.0 + radius * scale, 30.0 + radius * scale
+        width = left + max(x for _, x, _ in sites) * scale + radius * scale + 15
+        height = top + max(y for _, _, y in sites) * scale + radius * scale + 15
+        canvas = tk.Canvas(frame, width=width, height=height,
+                           background="#15191d", highlightthickness=0)
+        canvas.pack(anchor="w", padx=5, pady=5)
+        for ci, column in enumerate(columns):
+            canvas.create_text(left + sites[ci][1] * scale, 15,
+                               text=str(column), fill="white")
+        for ri, row in enumerate(rows):
+            canvas.create_text(8, top + ri * float(panel["spacing_y_nm"]) * scale,
+                               text=str(row), fill="white", anchor="w")
+        active = panel.get("active")
+        colors = panel.get("colors", {})
+        targets = []
+        for index, (name, x_nm, y_nm) in enumerate(sites):
+            ri, ci = divmod(index, len(columns))
+            position = (str(rows[ri]), str(columns[ci]))
+            configured = active is None or position in active
+            selectable = configured and name in available
+            x, y, r = left + x_nm * scale, top + y_nm * scale, radius * scale
+            color = str(colors.get(position, "#34c6d3")) if selectable else "#62676b"
+            ring = canvas.create_oval(x-r, y-r, x+r, y+r, outline=color, width=1.5)
+            dot = canvas.create_oval(x-4, y-4, x+4, y+4, fill=color, outline="")
+            if configured:
+                self.circle_sites[name] = (canvas, ring, dot, color)
+                self._paint_square(name)
+            if not selectable:
+                canvas.create_text(x, y, text="×", fill="#969ba0")
+            targets.append((name, x_nm, y_nm, selectable))
+        def toggle(event):
+            name = nearest_panel_site(targets, (event.x-left)/scale, (event.y-top)/scale, radius_nm=radius)
+            if name is not None:
+                self.variables[name].set(not self.variables[name].get())
+                self._on_square_toggled(name)
+        canvas.bind("<Button-1>", toggle)
+        ttk.Label(frame, text="Click near a site center to select it. Cyan-filled circles are selected; "
+                  "gray × sites are unavailable. Circles overlap at their physical spacing.").pack(anchor="w", padx=5)
+
     @staticmethod
     def _legend_square(parent: tk.Widget, background: str, text: str, foreground: str = "#222222") -> tk.Label:
         return tk.Label(
@@ -356,6 +437,16 @@ class SetView:
         )
 
     def _paint_square(self, name: str) -> None:
+        circle = self.circle_sites.get(name)
+        if circle is not None:
+            canvas, ring, dot, color = circle
+            selected = self.variables[name].get()
+            color = self.CONFLICT_BG if selected and name in self.conflicts else ("#00ffff" if selected else color)
+            canvas.itemconfigure(ring, outline=color, fill="#00ffff" if selected else "",
+                                 width=3 if selected else 1.5)
+            canvas.itemconfigure(dot, fill=color)
+            self._update_selection_summary()
+            return
         button = self.buttons.get(name)
         variable = self.variables.get(name)
         if button is None or variable is None or not self.selectable.get(name, False):
@@ -393,7 +484,7 @@ class SetView:
 
     def mark_conflicts(self, names: Set[str]) -> None:
         self.conflicts = set(names)
-        for name in self.buttons:
+        for name in self.buttons.keys() | self.circle_sites.keys():
             self._paint_square(name)
 
     def clear(self) -> None:
@@ -417,6 +508,26 @@ def panel_display_columns(panel: Dict[str, object]) -> List[object]:
     """Return columns in their physical left-to-right display order."""
     columns = list(panel["columns"])
     return list(reversed(columns)) if panel.get("mirror_columns", False) else columns
+
+
+def panel_circle_centers(panel):
+    """Physical centers in displayed order, matching panel template exports."""
+    columns = panel_display_columns(panel)
+    offsets = [0.0 if i < 6 else EXTENSION_EXTRA_COLUMN_GAP_NM for i in range(len(columns))]
+    xs = template_column_positions(len(columns), float(panel["spacing_x_nm"]),
+                                   {"column_offsets_nm": offsets})
+    return [(panel_sequence_name(panel, row, column), float(xs[ci]),
+             ri * float(panel["spacing_y_nm"]))
+            for ri, row in enumerate(panel["rows"])
+            for ci, column in enumerate(columns)]
+
+
+def nearest_panel_site(sites, x, y, radius_nm=7.5):
+    """Choose the nearest center, including unavailable sites to avoid misclicks."""
+    if not sites:
+        return None
+    name, sx, sy, selectable = min(sites, key=lambda site: (site[1]-x)**2 + (site[2]-y)**2)
+    return name if selectable and (sx-x)**2 + (sy-y)**2 <= radius_nm**2 else None
 
 
 def panel_template_positions(
@@ -690,6 +801,7 @@ class OrigamiTemplateView(ttk.Frame):
         self.logical_stroke_variables: Dict[str, tk.BooleanVar] = {}
         self.logical_schema: Optional[Dict[str, object]] = empty_logical_bit_schema(8, 12)
         self.selected_group_id: Optional[str] = None
+        self.selected_group_ids: List[str] = []
         self.group_name_var = tk.StringVar()
         self.group_role_var = tk.StringVar(value="Digital bit")
         self.group_active_var = tk.BooleanVar(value=True)
@@ -698,6 +810,7 @@ class OrigamiTemplateView(ttk.Frame):
         self.columns_var = tk.StringVar(value="12")
         self.spacing_x_var = tk.StringVar(value=str(EXTENSION_COLUMN_SPACING_NM))
         self.spacing_y_var = tk.StringVar(value=str(EXTENSION_ROW_SPACING_NM))
+        self.column_gap_var = tk.StringVar(value=str(EXTENSION_EXTRA_COLUMN_GAP_NM))
         self.margin_var = tk.StringVar(value="20")
         self.sigma_var = tk.StringVar(value="1.5")
         self.width_var = tk.StringVar(value="500")
@@ -779,6 +892,7 @@ class OrigamiTemplateView(ttk.Frame):
             ("Grid columns", self.columns_var),
             ("Spacing x (nm)", self.spacing_x_var),
             ("Spacing y (nm)", self.spacing_y_var),
+            ("Extra gap C6–C7 (nm)", self.column_gap_var),
             ("Image margin (nm)", self.margin_var),
             ("Spot sigma (nm)", self.sigma_var),
             ("PNG width (px)", self.width_var),
@@ -851,6 +965,22 @@ class OrigamiTemplateView(ttk.Frame):
         except ValueError as exc:
             raise ValueError("Spacing, margin, sigma, and PNG width must be numeric.") from exc
         validate_template_settings(*values)
+        try:
+            gap = float(self.column_gap_var.get())
+        except ValueError as exc:
+            raise ValueError("The column 6–7 gap must be numeric.") from exc
+        if not math.isfinite(gap) or gap < 0:
+            raise ValueError("The column 6–7 gap must be finite and nonnegative.")
+        if self.logical_schema is not None and (rows, columns) == self._built_shape:
+            offsets = list(self.logical_schema.get("column_offsets_nm", [0.0] * columns))
+            if len(offsets) != columns:
+                raise ValueError("Column offsets must match the grid width.")
+            if columns > 6:
+                change = gap - (offsets[6] - offsets[5])
+                offsets[6:] = [value + change for value in offsets[6:]]
+            self.logical_schema["column_offsets_nm"] = offsets
+            self.logical_schema["spacing_x_nm"] = values[2]
+            self.logical_schema["spacing_y_nm"] = values[3]
         return values
 
     def _rebuild_grid(
@@ -884,6 +1014,7 @@ class OrigamiTemplateView(ttk.Frame):
             schema = empty_logical_bit_schema(rows, columns)
             self.logical_schema = schema
             self.selected_group_id = None
+            self.selected_group_ids = []
         self._build_logical_controls(schema, schema.get("active_logical_bits", []))
         for column in range(columns):
             ttk.Label(self.grid_frame, text="C{}".format(column + 1), anchor="center").grid(
@@ -932,7 +1063,7 @@ class OrigamiTemplateView(ttk.Frame):
         )
         for row, buttons in enumerate((
             (("Create group", self._create_group), ("Update group", self._update_group)),
-            (("Delete group", self._delete_group), ("Toggle bit ON/OFF", self._toggle_group_active)),
+            (("Delete selected", self._delete_group), ("Toggle bit ON/OFF", self._toggle_group_active)),
         ), start=3):
             for column, (label, command) in enumerate(buttons):
                 ttk.Button(editor, text=label, command=command).grid(
@@ -945,7 +1076,7 @@ class OrigamiTemplateView(ttk.Frame):
             columns=("color", "name", "role", "sites", "state"),
             show="headings",
             height=5,
-            selectmode="browse",
+            selectmode="extended",
             style="BitGroups.Treeview",
         )
         for key, label, width in (
@@ -962,6 +1093,8 @@ class OrigamiTemplateView(ttk.Frame):
         group_scroll.grid(row=1, column=1, sticky="ns", pady=(6, 0))
         self.group_tree.configure(yscrollcommand=group_scroll.set)
         self.group_tree.bind("<<TreeviewSelect>>", self._group_selected)
+        if sys.platform == "darwin":
+            self.group_tree.bind("<Command-Button-1>", self._command_select_group)
         bit_ids = {str(bit["id"]) for bit in schema.get("logical_bits", [])}
         groups = list(schema.get("alignment_groups", [])) + list(schema.get("logical_bits", []))
         for group in groups:
@@ -984,8 +1117,9 @@ class OrigamiTemplateView(ttk.Frame):
             self.group_tree.tag_configure(group_id, foreground=color)
             if is_bit:
                 self.logical_stroke_variables[group_id] = tk.BooleanVar(value=group_id in active)
-        if self.selected_group_id in self.group_tree.get_children():
-            self.group_tree.selection_set(self.selected_group_id)
+        selected = [group_id for group_id in self.selected_group_ids if self.group_tree.exists(group_id)]
+        if selected:
+            self.group_tree.selection_set(selected)
 
     def _logical_strokes_changed(self) -> None:
         if self.logical_schema is not None:
@@ -1011,22 +1145,29 @@ class OrigamiTemplateView(ttk.Frame):
             return None
         return next((group for group in self._all_groups() if str(group.get("id")) == group_id), None)
 
+    def _command_select_group(self, event) -> str:
+        group_id = self.group_tree.identify_row(event.y)
+        if group_id:
+            self.group_tree.focus(group_id)
+            self.group_tree.selection_toggle(group_id)
+        return "break"
+
     def _group_selected(self, _event: object = None) -> None:
-        selection = self.group_tree.selection()
-        if not selection:
-            return
-        group_id = str(selection[0])
-        group = self._group_by_id(group_id)
-        if group is None or self.logical_schema is None:
-            return
-        self.selected_group_id = group_id
-        self.group_name_var.set(str(group.get("label", group_id)))
-        is_bit = any(str(bit.get("id")) == group_id for bit in self.logical_schema.get("logical_bits", []))
-        self.group_role_var.set("Digital bit" if is_bit else "Alignment-only")
-        self.group_active_var.set(
-            bool(self.logical_stroke_variables[group_id].get()) if is_bit else True
-        )
-        sites = {(int(row) - 1, int(column) - 1) for row, column in group.get("physical_sites", [])}
+        self.selected_group_ids = list(self.group_tree.selection())
+        groups = [self._group_by_id(group_id) for group_id in self.selected_group_ids]
+        groups = [group for group in groups if group is not None]
+        self.selected_group_id = self.selected_group_ids[0] if len(groups) == 1 else None
+        if len(groups) == 1:
+            group = groups[0]
+            group_id = self.selected_group_id
+            self.group_name_var.set(str(group.get("label", group_id)))
+            is_bit = group_id in self.logical_stroke_variables
+            self.group_role_var.set("Digital bit" if is_bit else "Alignment-only")
+            self.group_active_var.set(self.logical_stroke_variables[group_id].get() if is_bit else True)
+        else:
+            self.group_name_var.set("")
+        sites = {(int(row) - 1, int(column) - 1)
+                 for group in groups for row, column in group.get("physical_sites", [])}
         for site, variable in self.site_variables.items():
             variable.set(site in sites)
             self._paint_site(site)
@@ -1053,6 +1194,9 @@ class OrigamiTemplateView(ttk.Frame):
         self._store_group(create=False)
 
     def _store_group(self, *, create: bool) -> None:
+        if not create and len(self.selected_group_ids) != 1:
+            messagebox.showerror("Select one group", "Select exactly one group to update its name and sites.", parent=self)
+            return
         label = self.group_name_var.get().strip()
         selected = self._selected_sites()
         if not label or not selected:
@@ -1099,33 +1243,36 @@ class OrigamiTemplateView(ttk.Frame):
             old_active.add(group_id)
         self.logical_schema["active_logical_bits"] = sorted(old_active)
         self.selected_group_id = group_id
+        self.selected_group_ids = [group_id]
         self._build_logical_controls(self.logical_schema, old_active)
         self._settings_changed()
 
     def _delete_group(self) -> None:
-        if self.selected_group_id is None or self.logical_schema is None:
+        if not self.selected_group_ids or self.logical_schema is None:
             return
-        deleted = self.selected_group_id
+        deleted = set(self.selected_group_ids)
         active = set(self._active_bit_ids())
         for key in ("alignment_groups", "logical_bits"):
             self.logical_schema[key] = [
                 group
                 for group in self.logical_schema.get(key, [])
-                if str(group.get("id")) != deleted
+                if str(group.get("id")) not in deleted
             ]
-        active.discard(deleted)
+        active.difference_update(deleted)
         self.logical_schema["active_logical_bits"] = sorted(active)
         self.selected_group_id = None
+        self.selected_group_ids = []
         self.group_name_var.set("")
         self._build_logical_controls(self.logical_schema, active)
         self._settings_changed()
 
     def _toggle_group_active(self) -> None:
-        if self.selected_group_id not in self.logical_stroke_variables or self.logical_schema is None:
+        if self.logical_schema is None:
             return
-        variable = self.logical_stroke_variables[self.selected_group_id]
-        variable.set(not variable.get())
-        self.group_active_var.set(variable.get())
+        for group_id in self.selected_group_ids:
+            variable = self.logical_stroke_variables.get(group_id)
+            if variable is not None:
+                variable.set(not variable.get())
         active = self._active_bit_ids()
         self.logical_schema["active_logical_bits"] = active
         self._build_logical_controls(self.logical_schema, active)
@@ -1158,6 +1305,12 @@ class OrigamiTemplateView(ttk.Frame):
             messagebox.showerror("Invalid bit schema", str(exc), parent=self)
             return
         self.logical_schema = schema
+        if "spacing_x_nm" in schema:
+            self.spacing_x_var.set(str(schema["spacing_x_nm"]))
+        if "spacing_y_nm" in schema:
+            self.spacing_y_var.set(str(schema["spacing_y_nm"]))
+        offsets = schema.get("column_offsets_nm", [0.0] * columns)
+        self.column_gap_var.set(str(float(offsets[6]) - float(offsets[5]) if columns > 6 else 0.0))
         self.rows_var.set(str(rows))
         self.columns_var.set(str(columns))
         self.initial_directory = Path(path_text).parent
@@ -1187,6 +1340,7 @@ class OrigamiTemplateView(ttk.Frame):
             return
         try:
             path = Path(path_text)
+            self._settings()
             schema = normalize_logical_bit_schema(self.logical_schema, *self._built_shape)
             path.write_text(json.dumps(schema, indent=2) + "\n", encoding="utf-8")
             self.initial_directory = path.parent
@@ -1206,12 +1360,14 @@ class OrigamiTemplateView(ttk.Frame):
         self.rows_var.set(str(len(rows)))
         self.columns_var.set(str(len(columns)))
         # The replacement-sheet lattice is physical and uniformly spans
-        # 120 x 40 nm between the outer site centers of a 12 x 8 grid.
+        # 121.1 x 35.7 nm including the extra 10 nm column 6–7 gap.
+        self.column_gap_var.set(str(EXTENSION_EXTRA_COLUMN_GAP_NM) if len(columns) > 6 else "0.0")
         self.spacing_x_var.set(str(EXTENSION_COLUMN_SPACING_NM))
         self.spacing_y_var.set(str(EXTENSION_ROW_SPACING_NM))
         self.sigma_var.set("1.5")
         self.logical_schema = empty_logical_bit_schema(len(rows), len(columns))
         self.selected_group_id = None
+        self.selected_group_ids = []
         self.source_name.set(
             "Loaded {} selected site{} from {} → {} (columns {:.4g} nm; rows {:.4g} nm).".format(
                 len(selected_sites),
@@ -1271,6 +1427,8 @@ class OrigamiTemplateView(ttk.Frame):
     def _settings_changed(self) -> None:
         group = self._group_by_id(self.selected_group_id)
         group_label = "Editing: {}".format(group.get("label", self.selected_group_id)) if group else "New group"
+        if len(self.selected_group_ids) > 1:
+            group_label = "{} groups selected".format(len(self.selected_group_ids))
         self.site_selection_summary.set(
             "{} • {} sites selected • ✓ Green = selected for editing".format(group_label, len(self._selected_sites()))
         )
@@ -1279,8 +1437,13 @@ class OrigamiTemplateView(ttk.Frame):
             if (rows, columns) != self._built_shape:
                 self.status.set("Grid dimensions changed — click Apply grid size before saving.")
                 return
+            positions = template_column_positions(columns, spacing_x, self.logical_schema)
             width_nm, height_nm = template_size_nm(rows, columns, spacing_x, spacing_y, margin)
-            site_width_nm = (columns - 1) * spacing_x
+            site_width_nm = positions[-1]
+            width_nm = site_width_nm + 2 * margin
+            gap_padding = max(0, int(round(float(self.column_gap_var.get()) * 3))) if columns > 6 else 0
+            for (row, column), button in self.site_buttons.items():
+                button.grid_configure(padx=(2 + gap_padding, 2) if column == 6 else 2)
             site_height_nm = (rows - 1) * spacing_y
             group_count = len(self._all_groups())
             active_count = len(self._active_bit_ids())
@@ -1303,7 +1466,9 @@ class OrigamiTemplateView(ttk.Frame):
             rows, columns, spacing_x, spacing_y, margin, sigma, _width = self._settings()
         except ValueError:
             return
+        positions = template_column_positions(columns, spacing_x, self.logical_schema)
         width_nm, height_nm = template_size_nm(rows, columns, spacing_x, spacing_y, margin)
+        width_nm = positions[-1] + 2 * margin
         available_width = max(40, self.preview.winfo_width() - 50)
         available_height = max(40, self.preview.winfo_height() - 50)
         scale = min(available_width / width_nm, available_height / height_nm)
@@ -1313,7 +1478,10 @@ class OrigamiTemplateView(ttk.Frame):
         self.preview.create_rectangle(
             left, top, left + draw_width, top + draw_height, fill="#000000", outline="#666b70"
         )
-        radius = max(3.0, sigma * scale * 1.5)
+        # Match the physical site-mask circles in the analysis overlay.
+        radius_nm = 7.5
+        radius = radius_nm * scale
+        center_radius = min(radius * 0.2, max(1.0, sigma * scale * 0.5))
         selected = set(self._rendered_sites())
         group_colors: Dict[Tuple[int, int], List[str]] = defaultdict(list)
         if self.logical_schema is not None:
@@ -1329,7 +1497,7 @@ class OrigamiTemplateView(ttk.Frame):
                     group_colors[(int(group_row) - 1, int(group_column) - 1)].append(color)
         for row in range(rows):
             for column in range(columns):
-                x = left + (margin + column * spacing_x) * scale
+                x = left + (margin + positions[column]) * scale
                 y = top + (margin + row * spacing_y) * scale
                 if (row, column) in selected:
                     colors = group_colors.get((row, column), ["#fff3a0"])
@@ -1345,18 +1513,31 @@ class OrigamiTemplateView(ttk.Frame):
                         y - radius,
                         x + radius,
                         y + radius,
-                        fill=blended,
-                        outline="#ffffff",
+                        fill="",
+                        outline=blended,
+                        width=1.5,
+                        tags=("site-mask",),
+                    )
+                    self.preview.create_oval(
+                        x - center_radius, y - center_radius,
+                        x + center_radius, y + center_radius,
+                        fill=blended, outline="", tags=("site-center",),
                     )
                 else:
                     self.preview.create_oval(
                         x - 3, y - 3, x + 3, y + 3, fill="", outline="#596169"
                     )
         self.preview.create_text(
+            left + draw_width / 2,
+            top - 8,
+            text=f"Site circles r = {radius_nm:g} nm · column pitch {spacing_x:g} nm · row pitch {spacing_y:g} nm · extra C6–C7 gap {float(self.column_gap_var.get()):g} nm",
+            fill="#aeb5ba", anchor="s",
+        )
+        self.preview.create_text(
             left + 8,
             top + draw_height - 8,
             text="site span {:.3g} × {:.3g} nm; raster {:.3g} × {:.3g} nm".format(
-                (columns - 1) * spacing_x,
+                positions[-1],
                 (rows - 1) * spacing_y,
                 width_nm,
                 height_nm,
