@@ -76,6 +76,24 @@ def clear_plate(state: Dict, plate_name: str) -> bool:
     return False
 
 
+def edit_destination_well(state: Dict, plate_name: str, well: str, label: str, used: bool) -> None:
+    """Edit a display label and usage without changing the physical well address."""
+    well = well.strip().upper()
+    if well not in all_384_wells():
+        raise ValueError("Choose a valid destination well (A01–P24).")
+    wells = plate_wells(state, plate_name)
+    labels = state["plates"][plate_name].setdefault("labels", {})
+    if label.strip():
+        labels[well] = label.strip()
+    else:
+        labels.pop(well, None)
+    if used:
+        wells.setdefault(well, {"transfer_count": 0, "volume_nL": 0})
+    else:
+        wells.pop(well, None)
+    state["updated_utc"] = datetime.now(timezone.utc).isoformat()
+
+
 def record_transfers(state: Dict, rows: Sequence[Dict[str, object]]) -> None:
     timestamp = datetime.now(timezone.utc).isoformat()
     for row in rows:

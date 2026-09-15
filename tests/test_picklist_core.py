@@ -9,9 +9,12 @@ from pathlib import Path
 from app_state import (
     clear_plate,
     create_run_output_directory,
+    edit_destination_well,
+    load_json,
     next_unused_wells,
     plate_wells,
     record_transfers,
+    save_json,
     unused_wells_from,
 )
 from picklist_core import (
@@ -22,6 +25,7 @@ from picklist_core import (
     parse_source1,
     parse_source2,
     separate_mixing_recipes,
+    valid_well_list,
 )
 from selection_report import _grid_metrics, write_replacement_selection_pdf, write_stored_runs_selection_pdf
 from template_generator import (
@@ -615,6 +619,17 @@ class PicklistCoreTests(unittest.TestCase):
             self.assertIn(b"Run: Design alpha", data)
             self.assertIn(b"Run: Design beta", data)
 
+    def test_destination_well_input_normalizes_common_address_formats(self):
+        for value in ("A01,A02,P24", "a1, a2, p24", "A1 A2\nP24", " A1; A2; P24 "):
+            with self.subTest(value=value):
+                self.assertEqual(valid_well_list(value), ["A01", "A02", "P24"])
+
+    def test_destination_well_input_rejects_invalid_addresses_and_labels(self):
+        for value in ("A00", "A25", "Q01", "A01-A03", "Sample", "A001"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "Invalid destination well address"):
+                    valid_well_list(value)
+
     def test_destination_state_records_usage_and_skips_used_wells(self):
         state = {"version": 1, "plates": {}}
         record_transfers(
@@ -629,6 +644,38 @@ class PicklistCoreTests(unittest.TestCase):
         self.assertEqual(wells["A01"]["volume_nL"], 100)
         self.assertEqual(wells["A01"]["transfer_count"], 2)
         self.assertEqual(next_unused_wells(state, "Destination[1]", 3), ["A03", "A04", "A05"])
+
+    def test_edit_destination_well_releases_only_selected_well_and_persists_label(self):
+        state = {"plates": {}}
+        record_transfers(state, [
+            {"Destination Plate Name": plate, "Destination Well": well, "Transfer Volume": 50}
+            for plate, well in [("Plate 1", "A01"), ("Plate 1", "A02"), ("Plate 2", "A01")]
+        ])
+        edit_destination_well(state, "Plate 1", "A01", " Cancelled run ", False)
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "state.json"
+            save_json(path, state)
+            restored = load_json(path, {})
+        self.assertEqual(restored["plates"]["Plate 1"]["labels"]["A01"], "Cancelled run")
+        self.assertEqual(next_unused_wells(restored, "Plate 1", 2), ["A01", "A03"])
+        self.assertEqual(unused_wells_from(restored, "Plate 1", "A01", 2), ["A01", "A03"])
+        self.assertEqual(plate_wells(restored, "Plate 2")["A01"]["volume_nL"], 50)
+        self.assertNotIn("A01", plate_wells(restored, "Plate 1"))
+
+    def test_edit_destination_label_preserves_usage_and_manual_used_status(self):
+        state = {"plates": {}}
+        row = {"Destination Plate Name": "Plate", "Destination Well": "A01", "Transfer Volume": 50}
+        record_transfers(state, [row])
+        original_usage = dict(plate_wells(state, "Plate")["A01"])
+        edit_destination_well(state, "Plate", "A01", "Sample", True)
+        self.assertEqual(plate_wells(state, "Plate")["A01"], original_usage)
+        edit_destination_well(state, "Plate", "A01", "", True)
+        self.assertNotIn("A01", state["plates"]["Plate"]["labels"])
+        edit_destination_well(state, "Plate", "A02", "Reserved", True)
+        self.assertEqual(next_unused_wells(state, "Plate", 1), ["A03"])
+        self.assertEqual(plate_wells(state, "Plate")["A02"]["volume_nL"], 0)
+        with self.assertRaises(ValueError):
+            edit_destination_well(state, "Plate", "A25", "Invalid", False)
 
     def test_each_output_directory_is_timestamped_and_unique(self):
         with tempfile.TemporaryDirectory() as folder:

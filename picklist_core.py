@@ -365,8 +365,15 @@ def write_csv(path: Path, rows: Sequence[Dict[str, object]], columns: Sequence[s
 
 
 def valid_well_list(text: str) -> List[str]:
-    wells = [_clean(value).upper() for value in text.split(",") if _clean(value)]
-    invalid = [well for well in wells if not re.fullmatch(r"[A-P](?:0[1-9]|1[0-9]|2[0-4])", well)]
+    """Accept comma/whitespace-separated addresses and normalize A1 to A01."""
+    wells = [value.upper() for value in re.split(r"[,;\s]+", text.strip()) if value]
+    invalid = [well for well in wells if not re.fullmatch(r"[A-P](?:0?[1-9]|1[0-9]|2[0-4])", well)]
     if invalid:
-        raise ValueError("Invalid 384-well position(s): {}".format(", ".join(invalid)))
-    return wells
+        raise ValueError(
+            "Invalid destination well address(es): {}. Enter individual addresses from A01 to P24 "
+            "(for example: A01, A02, A03), not labels or ranges. "
+            "Changing a plate label or Used status does not change the Destination wells field.".format(
+                ", ".join(invalid)
+            )
+        )
+    return ["{}{:02d}".format(well[0], int(well[1:])) for well in wells]

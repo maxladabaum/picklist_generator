@@ -138,7 +138,12 @@ you click **Make Picklist** and pass the check.
    without writing files, recording destination usage, or advancing wells.
 6. Open **Destination Plate** to see the 16×24 plate map. Previously used wells,
    wells at capacity, and the wells currently entered in Settings have distinct
-   colors. Click any well for its recorded transfer and volume details.
+   colors. Click any well for its recorded transfer and volume details. Edit its
+   **Label** and **Used** checkbox, then click **Save well**. Uncheck **Used** to
+   clear that well's recorded transfers and make it available again (for example,
+   after deleting an unused picklist). Labels are saved per plate; a blank label
+   shows the well address. Long labels are shortened on the map and shown in full
+   in the editor. Labels do not change well addresses in generated picklists.
 7. Review the previews under **Results**. Choose **Save picklist + recipe** to
    write the individual CSV files, or choose **Send to storage** and enter a run
    name without writing those individual files. Either action records the
@@ -148,14 +153,18 @@ you click **Make Picklist** and pass the check.
    click **Select all**, then click **Generate combined picklist + recipe**. The
    transfer rows are concatenated into one large picklist, while each run keeps
    its own mixing-recipe CSV with the run name in its filename. Volumes are not
-   summed across runs. Everything is written to a new timestamped output folder.
+   summed across runs. These files are written directly to **Generated output
+   root** in Settings, alongside selections PDFs. Re-exporting replaces files
+   with matching names in that folder.
    Runs that reuse the same destination plate and well cannot be combined.
 9. Use **Generate selections PDF** in Storage to create one large PDF for the
    selected runs. Every named run starts on a new page and includes all of its
    selected replacement panels. **Select all** includes every stored run. The
-   PDF is saved automatically in a new timestamped generated-output folder.
+   PDF is saved automatically in **Generated output root**, in the same folder
+   as combined picklists and mixing recipes. **Save selections PDF** in
+   Replacements also uses this folder.
 10. Individual CSV paths are shown in Settings; after a combined generation,
-   the Storage tab reports its new output folder and a confirmation shows the
+   the Storage tab reports its output folder and a confirmation shows the
     full path.
 
 ### Custom logical-bit encodings

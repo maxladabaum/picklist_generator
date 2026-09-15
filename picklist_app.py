@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import tkinter as tk
+from copy import deepcopy
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,7 @@ from app_state import (
     all_384_wells,
     clear_plate,
     create_run_output_directory,
+    edit_destination_well,
     load_json,
     next_unused_wells,
     normalize_recent_wells,
@@ -123,7 +125,7 @@ class SetView:
     ) -> None:
         self.title = title
         self.path_var = tk.StringVar(value=str(csv_path))
-        self.excess_multiplier = tk.StringVar(value="1")
+        self.excess_multiplier = tk.StringVar(value="5" if title in {"PAINT P1", "PAINT R1"} else "1")
         self.plate_name = plate_name
         self.variables: Dict[str, tk.BooleanVar] = {}
         self.buttons: Dict[str, tk.Checkbutton] = {}
@@ -138,6 +140,7 @@ class SetView:
         self.selection_changed = selection_changed
         self.template_requested = template_requested
         self.panels = panels
+        self._panel_cache = {}
 
         scroll = ScrollFrame(parent)
         scroll.pack(fill="both", expand=True)
@@ -207,7 +210,10 @@ class SetView:
             self.circle_radius_error.set("Enter a radius greater than 0 and at most 50 nm.")
             return
         self.circle_radius_error.set("")
+        if radius == self.circle_radius_nm:
+            return
         self.circle_radius_nm = radius
+        self._clear_panel_cache()
         self._show_panel()
 
     def _browse(self) -> None:
@@ -217,6 +223,7 @@ class SetView:
             self.refresh()
 
     def refresh(self) -> None:
+        self._clear_panel_cache()
         self.variables.clear()
         self.buttons.clear()
         self.circle_sites.clear()
@@ -243,12 +250,14 @@ class SetView:
                     self.selectable[name] = name in self.available
         self._show_panel()
 
-    def _show_panel(self) -> None:
+    def _clear_panel_cache(self) -> None:
         for child in self.panel_host.winfo_children():
             child.destroy()
-        self.buttons.clear()
-        self.circle_sites.clear()
-        self.color_frames.clear()
+        self._panel_cache.clear()
+
+    def _show_panel(self) -> None:
+        for child in self.panel_host.winfo_children():
+            child.pack_forget()
         panel = self._current_panel()
         pitch = "{:.4g} nm columns; {:.4g} nm rows".format(
             EXTENSION_COLUMN_SPACING_NM,
@@ -263,7 +272,20 @@ class SetView:
         if panel.get("spacing_x_nm") is not None:
             orientation += "; extra C6–C7 gap: {:g} nm; circle radius: {:g} nm".format(EXTENSION_EXTRA_COLUMN_GAP_NM, self.circle_radius_nm)
         self.orientation_summary.set(orientation)
-        self._build_panel(panel, self.available)
+        key = str(panel["label"])
+        cached = self._panel_cache.get(key)
+        if cached is None:
+            self.buttons = {}
+            self.circle_sites = {}
+            self.color_frames = {}
+            self._build_panel(panel, self.available)
+            frame = self.panel_host.winfo_children()[-1]
+            self._panel_cache[key] = (frame, self.buttons, self.circle_sites, self.color_frames)
+        else:
+            frame, self.buttons, self.circle_sites, self.color_frames = cached
+            frame.pack(fill="x", pady=5)
+            for name in self.buttons.keys() | self.circle_sites.keys():
+                self._paint_square(name)
         self._update_selection_summary()
 
     def _current_panel(self) -> Dict[str, object]:
@@ -316,7 +338,9 @@ class SetView:
                 configured = active is None or position in active
                 exists = name in available
                 is_selectable = configured and exists
-                variable = self.variables.get(name, tk.BooleanVar(value=False))
+                variable = self.variables.get(name)
+                if variable is None:
+                    variable = tk.BooleanVar(value=False)
                 color = colors.get(position) if isinstance(colors, dict) else None
                 color_frame = None
                 button_parent = frame
@@ -445,7 +469,6 @@ class SetView:
             canvas.itemconfigure(ring, outline=color, fill="#00ffff" if selected else "",
                                  width=3 if selected else 1.5)
             canvas.itemconfigure(dot, fill=color)
-            self._update_selection_summary()
             return
         button = self.buttons.get(name)
         variable = self.variables.get(name)
@@ -460,11 +483,11 @@ class SetView:
             foreground="#ffffff" if selected else "#222222",
             relief="sunken" if selected else "raised",
         )
-        self._update_selection_summary()
 
     def _on_square_toggled(self, name: str) -> None:
-        self.conflicts.clear()
+        self.mark_conflicts(set())
         self._paint_square(name)
+        self._update_selection_summary()
         if self.selection_changed is not None:
             self.selection_changed()
 
@@ -483,8 +506,9 @@ class SetView:
         self.selection_summary.set("{} selected in this set".format(count))
 
     def mark_conflicts(self, names: Set[str]) -> None:
+        changed = self.conflicts.symmetric_difference(names)
         self.conflicts = set(names)
-        for name in self.buttons.keys() | self.circle_sites.keys():
+        for name in changed & (self.buttons.keys() | self.circle_sites.keys()):
             self._paint_square(name)
 
     def clear(self) -> None:
@@ -682,8 +706,11 @@ class DestinationPlateView(ttk.Frame):
     LEFT = 38
     TOP = 32
 
-    def __init__(self, parent: tk.Widget) -> None:
+    def __init__(self, parent: tk.Widget, save_well) -> None:
         super().__init__(parent, padding=10)
+        self.save_well = save_well
+        self.selected_well = None
+        self.current_labels = {}
         self.summary = tk.StringVar()
         self.detail = tk.StringVar(value="Click a well to see its recorded usage.")
         ttk.Label(self, textvariable=self.summary, font=("TkDefaultFont", 11, "bold")).pack(fill="x")
@@ -710,14 +737,31 @@ class DestinationPlateView(ttk.Frame):
         canvas_host.rowconfigure(0, weight=1)
         canvas_host.columnconfigure(0, weight=1)
         ttk.Label(self, textvariable=self.detail, padding=(2, 7)).pack(fill="x")
+        editor = ttk.Frame(self)
+        editor.pack(fill="x")
+        self.selection_text = tk.StringVar(value="Select a well")
+        self.label_var = tk.StringVar()
+        self.used_var = tk.BooleanVar()
+        ttk.Label(editor, textvariable=self.selection_text, width=16).pack(side="left")
+        ttk.Label(editor, text="Label:").pack(side="left", padx=(0, 5))
+        self.label_entry = ttk.Entry(editor, textvariable=self.label_var, width=32, state="disabled")
+        self.label_entry.pack(side="left")
+        self.used_check = ttk.Checkbutton(editor, text="Used", variable=self.used_var, state="disabled")
+        self.used_check.pack(side="left", padx=10)
+        self.save_button = ttk.Button(editor, text="Save well", command=self._save_selected, state="disabled")
+        self.save_button.pack(side="left")
+        ttk.Label(self, text="Uncheck Used to clear recorded transfers and make the well available again. Leave Label blank to show its address.").pack(fill="x", pady=(5, 0))
         self.canvas.bind("<Button-1>", self._clicked)
         self.current_plate = ""
         self.current_wells: Dict[str, Dict] = {}
         self.capacity_nl = 12500
 
     def render(self, plate_name: str, state: Dict, entered_wells: Sequence[str], capacity_ul: float) -> None:
+        if plate_name != self.current_plate:
+            self.selected_well = None
         self.current_plate = plate_name
         self.current_wells = plate_wells(state, plate_name)
+        self.current_labels = state["plates"][plate_name].get("labels", {})
         self.capacity_nl = max(1, int(capacity_ul * 1000))
         entered = set(entered_wells)
         used_count = len(self.current_wells)
@@ -739,6 +783,7 @@ class DestinationPlateView(ttk.Frame):
                 well = "{}{:02d}".format(row, column)
                 x = self.LEFT + (column - 1) * self.CELL_WIDTH
                 usage = self.current_wells.get(well)
+                label = self.current_labels.get(well, well)
                 if well in entered and usage:
                     fill = "#f3a35c"
                 elif well in entered:
@@ -755,19 +800,21 @@ class DestinationPlateView(ttk.Frame):
                     x + self.CELL_WIDTH - 2,
                     y + self.CELL_HEIGHT - 2,
                     fill=fill,
-                    outline="#59636b",
+                    outline="#d62728" if well == self.selected_well else "#59636b",
+                    width=2 if well == self.selected_well else 1,
                     tags=("well", well),
                 )
                 self.canvas.create_text(
                     x + self.CELL_WIDTH / 2,
                     y + self.CELL_HEIGHT / 2,
-                    text=well,
+                    text=label[:5] + "…" if len(label) > 6 else label,
                     font=("TkDefaultFont", 7),
                     tags=("well", well),
                 )
         width = self.LEFT + 24 * self.CELL_WIDTH + 8
         height = self.TOP + 16 * self.CELL_HEIGHT + 8
         self.canvas.configure(scrollregion=(0, 0, width, height))
+        self._load_selected()
 
     def _clicked(self, event) -> None:
         column = int((self.canvas.canvasx(event.x) - self.LEFT) // self.CELL_WIDTH) + 1
@@ -775,6 +822,27 @@ class DestinationPlateView(ttk.Frame):
         if column not in range(1, 25) or row_index not in range(16):
             return
         well = "{}{:02d}".format(PLATE_ROWS[row_index], column)
+        self.selected_well = well
+        for item in self.canvas.find_withtag("well"):
+            if self.canvas.type(item) == "rectangle":
+                selected = well in self.canvas.gettags(item)
+                self.canvas.itemconfigure(item, outline="#d62728" if selected else "#59636b", width=2 if selected else 1)
+        self._load_selected()
+
+    def _save_selected(self) -> None:
+        if self.selected_well:
+            self.save_well(self.current_plate, self.selected_well, self.label_var.get(), self.used_var.get())
+
+    def _load_selected(self) -> None:
+        well = self.selected_well
+        for widget in (self.label_entry, self.used_check, self.save_button):
+            widget.configure(state="normal" if well else "disabled")
+        self.selection_text.set(well or "Select a well")
+        self.label_var.set(self.current_labels.get(well, ""))
+        self.used_var.set(well in self.current_wells)
+        if not well:
+            self.detail.set("Click a well to edit its label and recorded usage.")
+            return
         usage = self.current_wells.get(well)
         if not usage:
             self.detail.set("{} is unused on {}.".format(well, self.current_plate))
@@ -1716,7 +1784,7 @@ class PicklistApp(tk.Tk):
             plate_actions,
             text="Clears recorded usage for the currently named destination plate; generated files are not deleted.",
         ).pack(side="left", padx=12)
-        self.plate_view = DestinationPlateView(plate_page)
+        self.plate_view = DestinationPlateView(plate_page, self._save_destination_well)
         self.plate_view.pack(fill="both", expand=True)
         self._build_storage(storage_page)
         self._build_preview(preview_page)
@@ -1815,6 +1883,13 @@ class PicklistApp(tk.Tk):
                     )
         return panels
 
+    def _shared_export_directory(self) -> Path:
+        directory = Path(self.output_root.get()).expanduser()
+        if not directory.is_absolute():
+            directory = APP_DIR / directory
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
     def save_selections_pdf(self) -> None:
         """Export selected replacements from every panel as one PDF report."""
         panels = self._replacement_selection_panels()
@@ -1827,10 +1902,7 @@ class PicklistApp(tk.Tk):
             return
 
         try:
-            output_root = Path(self.output_root.get()).expanduser()
-            if not output_root.is_absolute():
-                output_root = APP_DIR / output_root
-            run_directory = create_run_output_directory(output_root)
+            run_directory = self._shared_export_directory()
             path = run_directory / "replacement_selections.pdf"
             write_replacement_selection_pdf(path, panels)
             messagebox.showinfo(
@@ -2013,6 +2085,18 @@ class PicklistApp(tk.Tk):
         plate_name = self.destination_plate.get().strip() or "Destination[1]"
         self.plate_view.render(plate_name, self.plate_state, entered, capacity)
 
+    def _save_destination_well(self, plate_name: str, well: str, label: str, used: bool) -> None:
+        updated = deepcopy(self.plate_state)
+        edit_destination_well(updated, plate_name, well, label, used)
+        try:
+            save_json(PLATE_STATE_PATH, updated)
+        except OSError as exc:
+            messagebox.showerror("Could not save well", str(exc), parent=self)
+            return
+        self.plate_state = updated
+        self._refresh_plate_view()
+        self.status.set("Saved {} on {} as {}".format(well, plate_name, "used" if used else "unused"))
+
     def _destination_well_count(self) -> int:
         current = normalize_recent_wells(self.destination_wells.get().split(","))
         if current:
@@ -2105,7 +2189,7 @@ class PicklistApp(tk.Tk):
         self.te_10x = self._field(mix, 3, "10X TE [nM, xTE, Mg, Na]", "0,10,0,0")
         self.magnesium = self._field(mix, 4, "Mg [nM, xTE, mM, Na]", "0,0,100,0")
         self.sodium = self._field(mix, 5, "Na [nM, xTE, Mg, mM]", "0,0,0,100")
-        self.desired = self._field(mix, 6, "Desired [µL, staple nM, scaffold nM, xTE, Mg mM, Na mM]", "500,10,1,1,12,5")
+        self.desired = self._field(mix, 6, "Desired [µL, staple nM, scaffold nM, xTE, Mg mM, Na mM]", "100,50,10,1,12,5")
 
         action = ttk.Frame(page, padding=14)
         action.grid(row=2, column=0, sticky="ew")
@@ -2476,10 +2560,7 @@ class PicklistApp(tk.Tk):
             save_json(STORAGE_STATE_PATH, self.storage_state)
 
         try:
-            output_root = Path(self.output_root.get()).expanduser()
-            if not output_root.is_absolute():
-                output_root = APP_DIR / output_root
-            run_directory = create_run_output_directory(output_root)
+            run_directory = self._shared_export_directory()
             path = run_directory / "stored_run_selections.pdf"
             write_stored_runs_selection_pdf(path, runs)
             messagebox.showinfo(
@@ -2504,10 +2585,7 @@ class PicklistApp(tk.Tk):
             recipes = [item.get("mixing_recipe", []) for item in selected]
             combined_picklist = combine_picklists(picklists)  # type: ignore[arg-type]
             separated_recipes = separate_mixing_recipes(recipes)  # type: ignore[arg-type]
-            output_root = Path(self.output_root.get()).expanduser()
-            if not output_root.is_absolute():
-                output_root = APP_DIR / output_root
-            run_directory = create_run_output_directory(output_root)
+            run_directory = self._shared_export_directory()
             picklist_output = run_directory / "picklist_combined.csv"
             write_csv(picklist_output, combined_picklist, PICKLIST_COLUMNS)
             for index, (item, recipe) in enumerate(zip(selected, separated_recipes), 1):
@@ -2576,8 +2654,10 @@ class PicklistApp(tk.Tk):
                 raise ValueError("Select at least one replacement.")
             transfer_volume = int(self.transfer_volume.get())
             transfers_per_source = int(self.transfers_per_source.get())
+            destination_wells = valid_well_list(self.destination_wells.get())
+            self.destination_wells.set(",".join(destination_wells))
             picklist = generate_picklist(
-                Path(self.base_path.get()), selections, valid_well_list(self.destination_wells.get()),
+                Path(self.base_path.get()), selections, destination_wells,
                 self.source_plate_type.get().strip(), self.destination_plate.get().strip(),
                 transfer_volume, float(self.max_volume.get()), transfers_per_source,
                 hinge_type=self._selected_hinge_type(),
