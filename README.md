@@ -239,3 +239,17 @@ The `.venv/`, generated CSVs, `config.json`, `destination_plate_state.json`,
 and `storage_state.json` are intentionally ignored by Git. This keeps
 each user's paths and plate history private. Commit the example JSON files so a
 fresh clone always starts with an unused destination plate.
+
+### Template image orientation
+
+The Origami Templates editor, preview, and new PNG exports display columns
+C12 → C1, matching PAINT R1 replacement ordering. Column/site IDs and logical
+schemas retain their canonical numbering; changing the display does not rename
+sites or bits. PNG embedded metadata and the JSON sidecar both record
+`image_mirrored_x: true`. The renderer can also export canonical images with
+`image_mirrored_x: false`.
+
+Paint Analysis uses this flag to avoid reflecting an already mirrored image.
+Legacy calibrated images without the flag retain the previous import behavior
+(horizontal reflection). Logical sites and column offsets remain canonical in
+both export orientations and are transformed independently by analysis.

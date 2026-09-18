@@ -989,7 +989,7 @@ class OrigamiTemplateView(ttk.Frame):
         ).grid(row=1, column=0, sticky="ew")
         self.grid_frame = ttk.LabelFrame(
             content,
-            text="Physical lattice sites — select sites for one group",
+            text="Physical lattice sites — PAINT R1 descending column order",
             padding=6,
         )
         self.grid_frame.grid(row=2, column=0, sticky="new")
@@ -1086,7 +1086,7 @@ class OrigamiTemplateView(ttk.Frame):
         self._build_logical_controls(schema, schema.get("active_logical_bits", []))
         for column in range(columns):
             ttk.Label(self.grid_frame, text="C{}".format(column + 1), anchor="center").grid(
-                row=0, column=column + 1, padx=3, pady=(0, 4)
+                row=0, column=columns - column, padx=3, pady=(0, 4)
             )
         for row in range(rows):
             ttk.Label(self.grid_frame, text="R{}".format(row + 1)).grid(row=row + 1, column=0, padx=(0, 6))
@@ -1100,7 +1100,7 @@ class OrigamiTemplateView(ttk.Frame):
                     style="SelectedLattice.TButton" if selected else "Lattice.TButton",
                     command=lambda item=site: self._toggle_site(item),
                 )
-                button.grid(row=row + 1, column=column + 1, padx=2, pady=2)
+                button.grid(row=row + 1, column=columns - column, padx=2, pady=2)
                 self.site_variables[site] = variable
                 self.site_buttons[site] = button
                 self._paint_site(site)
@@ -1446,7 +1446,13 @@ class OrigamiTemplateView(ttk.Frame):
                 EXTENSION_ROW_SPACING_NM,
             )
         )
-        self._rebuild_grid(selected_sites=set(selected_sites))
+        # Panel selections arrive in displayed coordinates. Recover canonical
+        # sequence-column IDs before the template editor mirrors its display.
+        canonical_sites = {
+            (row, len(columns) - 1 - column if panel.get("mirror_columns", False) else column)
+            for row, column in selected_sites
+        }
+        self._rebuild_grid(selected_sites=canonical_sites)
 
     def _toggle_site(self, site: Tuple[int, int]) -> None:
         variable = self.site_variables[site]
@@ -1511,7 +1517,7 @@ class OrigamiTemplateView(ttk.Frame):
             width_nm = site_width_nm + 2 * margin
             gap_padding = max(0, int(round(float(self.column_gap_var.get()) * 3))) if columns > 6 else 0
             for (row, column), button in self.site_buttons.items():
-                button.grid_configure(padx=(2 + gap_padding, 2) if column == 6 else 2)
+                button.grid_configure(padx=(2 + gap_padding, 2) if column == 5 else 2)
             site_height_nm = (rows - 1) * spacing_y
             group_count = len(self._all_groups())
             active_count = len(self._active_bit_ids())
@@ -1565,7 +1571,7 @@ class OrigamiTemplateView(ttk.Frame):
                     group_colors[(int(group_row) - 1, int(group_column) - 1)].append(color)
         for row in range(rows):
             for column in range(columns):
-                x = left + (margin + positions[column]) * scale
+                x = left + (width_nm - margin - positions[column]) * scale
                 y = top + (margin + row * spacing_y) * scale
                 if (row, column) in selected:
                     colors = group_colors.get((row, column), ["#fff3a0"])

@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from unittest.mock import Mock
 import json
 import struct
 import zlib
@@ -39,7 +40,7 @@ from template_generator import (
     save_barcode_template,
     template_size_nm,
 )
-from picklist_app import panel_circle_centers, nearest_panel_site, dense_panel, COLS, panel_definitions, panel_display_columns, panel_template_positions, panel_sequence_name, soyeon_mb_panels, mirna_panels
+from picklist_app import OrigamiTemplateView, panel_circle_centers, nearest_panel_site, dense_panel, COLS, panel_definitions, panel_display_columns, panel_template_positions, panel_sequence_name, soyeon_mb_panels, mirna_panels
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -87,8 +88,41 @@ class PicklistCoreTests(unittest.TestCase):
         )
         self.assertAlmostEqual(metadata["width_nm"], 158.9)
         for site, column in zip(metadata["selected_sites"], (5, 6)):
-            self.assertAlmostEqual(site["x_nm"], 20 + positions[column])
+            self.assertAlmostEqual(site["x_nm"], metadata["width_nm"] - 20 - positions[column])
         self.assertEqual(metadata["logical_model"]["column_offsets_nm"], schema["column_offsets_nm"])
+
+    def test_replacement_transfer_preserves_canonical_site_identity(self):
+        panel = dense_panel("U", mirror_columns=True)
+        selected = panel_template_positions(panel, {panel_sequence_name(panel, panel["rows"][0], panel["columns"][0])})
+        self.assertEqual(selected, [(0, 11)])
+        editor = Mock()
+        OrigamiTemplateView.load_replacement_panel(editor, "PAINT R1", panel, selected)
+        editor._rebuild_grid.assert_called_once_with(selected_sites={(0, 0)})
+
+    def test_export_records_mirroring_without_changing_logical_site_ids(self):
+        schema = {
+            "format": "paint-analysis-logical-bits-v1",
+            "physical_rows": 2, "physical_columns": 3,
+            "column_offsets_nm": [0, 2, 7],
+            "alignment_groups": [],
+            "logical_bits": [{"id": "first", "physical_sites": [[1, 1]]}],
+        }
+        args = dict(rows=2, columns=3, selected_sites=[(0, 0)],
+                    logical_schema=schema, width_px=101)
+        w, h, normal, old = render_barcode_template(**args, image_mirrored_x=False)
+        _, _, mirrored, new = render_barcode_template(**args)
+        expected = b"".join(normal[(y*w+x)*3:(y*w+x+1)*3]
+                            for y in range(h) for x in reversed(range(w)))
+        self.assertEqual(mirrored, expected)
+        self.assertFalse(old["image_mirrored_x"])
+        self.assertTrue(new["image_mirrored_x"])
+        self.assertEqual(new["logical_model"], old["logical_model"])
+        self.assertEqual(new["selected_sites"][0]["column"], 1)
+        with tempfile.TemporaryDirectory() as directory:
+            png, sidecar, metadata = save_barcode_template(Path(directory)/"test.png", **args)
+            self.assertTrue(json.loads(sidecar.read_text())["image_mirrored_x"])
+            # The embedded PNG text is written from the same metadata object.
+            self.assertIn(b'"image_mirrored_x":true', png.read_bytes())
 
     def test_mirna_panels_infer_all_anchor_positions(self):
         records, _ = parse_source2(SHEETS / "miRNA_replace.csv")

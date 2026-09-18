@@ -341,11 +341,15 @@ def render_barcode_template(
     width_px: int = 500,
     active_logical_bits: Iterable[str] | None = None,
     logical_schema: Dict[str, object] | None = None,
+    image_mirrored_x: bool = True,
 ) -> Tuple[int, int, bytes, Dict[str, object]]:
     """Render selected grid sites as equal-brightness Gaussian spots.
 
     Pixels are returned as row-major 8-bit grayscale values.  The top row in
-    ``selected_sites`` is the top row in the saved image.
+    ``selected_sites`` is the top row in the saved image. Site IDs, logical
+    groups and column offsets always use canonical C1..Cn coordinates.
+    By default the raster displays Cn..C1 to match PAINT R1 replacements;
+    image_mirrored_x records this independently of logical-site coordinates.
     """
     validate_template_settings(
         rows, columns, spacing_x_nm, spacing_y_nm, margin_nm, spot_sigma_nm, width_px
@@ -396,6 +400,8 @@ def render_barcode_template(
     sites = []
     for row, column in selected:
         x_nm = margin_nm + column_positions[column]
+        if image_mirrored_x:
+            x_nm = width_nm - x_nm
         y_nm = margin_nm + row * spacing_y_nm
         center_x = x_nm * (width_px - 1) / width_nm
         center_y = y_nm * (height_px - 1) / height_nm
@@ -436,6 +442,9 @@ def render_barcode_template(
     metadata: Dict[str, object] = {
         "format": "paint-analysis-origami-template-v1",
         "description": "Bright expected localization sites on a dark background.",
+        "image_mirrored_x": bool(image_mirrored_x),
+        "logical_site_column_order": "canonical-c1-to-cn",
+        "image_column_order": "cn-to-c1" if image_mirrored_x else "c1-to-cn",
         "rows": rows,
         "columns": columns,
         "column_offsets_nm": offsets,
@@ -509,6 +518,7 @@ def save_barcode_template(
     width_px: int = 500,
     active_logical_bits: Iterable[str] | None = None,
     logical_schema: Dict[str, object] | None = None,
+    image_mirrored_x: bool = True,
 ) -> Tuple[Path, Path, Dict[str, object]]:
     """Save a PNG template and a same-name JSON metadata sidecar."""
     path = Path(path)
@@ -525,6 +535,7 @@ def save_barcode_template(
         width_px,
         active_logical_bits,
         logical_schema,
+        image_mirrored_x,
     )
     write_grayscale_png(path, width, height, pixels, metadata)
     metadata_path = path.with_suffix(".json")
