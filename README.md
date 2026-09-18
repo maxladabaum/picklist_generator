@@ -60,6 +60,14 @@ uses for its desktop interface.
 
 The launchers create a local `.venv` on first use. There are no third-party
 Python packages to download. Generated files default to `generated_output/`.
+On Windows, the launcher reuses an existing working `.venv`, or tries `py -3`,
+`python`, and `python3` to find Python 3.9 or newer and create one. If it cannot
+find Python, install Python with Tcl/Tk support and enable the Python launcher
+or add Python to PATH. If it reports an unusable environment, rename `.venv`
+to `.venv-old` and launch again. Share the project without `.venv`; each
+computer needs its own environment. Tkinter comes with the Python installation
+and is not installed through `requirements.txt`.
+
 Every successful generation creates a new date-and-time folder, for example
 `generated_output/2026-08-10_14-32-07/`, containing that run's picklist and
 mixing recipe. A numeric suffix is added if two runs occur in the same second.
