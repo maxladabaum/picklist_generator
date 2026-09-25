@@ -57,9 +57,15 @@ def _rect(x: float, top: float, width: float, height: float, fill, stroke=(0.72,
     )
 
 
+def _selection_labels(panel: Dict[str, object]) -> List[str]:
+    fractions = panel.get("site_fractions", {})
+    return ["{} ({:g}%)".format(name, fractions.get(name, 1.0) * 100)
+            if fractions else str(name) for name in panel.get("selected_names", [])]
+
+
 def _card_height(panel: Dict[str, object]) -> int:
     rows = list(panel.get("rows", []))  # type: ignore[arg-type]
-    names = [str(value) for value in panel.get("selected_names", [])]  # type: ignore[union-attr]
+    names = _selection_labels(panel)
     name_lines = wrap(", ".join(names), width=56, break_long_words=False) or [""]
     _column_pitch, row_pitch, _marker_width, marker_height = _grid_metrics(panel)
     return int(math.ceil(76 + len(rows) * row_pitch + marker_height + len(name_lines) * 12))
@@ -114,7 +120,10 @@ def _page_commands(
         columns = [str(value) for value in panel.get("columns", [])]  # type: ignore[union-attr]
         active = {tuple(value) for value in panel.get("active", [])}  # type: ignore[union-attr]
         selected = {tuple(value) for value in panel.get("selected", [])}  # type: ignore[union-attr]
-        names = [str(value) for value in panel.get("selected_names", [])]  # type: ignore[union-attr]
+        names = _selection_labels(panel)
+        fractions = panel.get("site_fractions", {})
+        position_fractions = {tuple(position): fractions.get(name, 1.0)
+                              for position, name in zip(panel.get("selected", []), panel.get("selected_names", []))}
         name_lines = wrap(", ".join(names), width=56, break_long_words=False) or [""]
 
         commands.append(_rect(card_x, card_y, CARD_WIDTH, card_height, (1, 1, 1)))
@@ -136,7 +145,9 @@ def _page_commands(
                 center_x = grid_x + (column_index + 0.5) * column_pitch
                 x = center_x - marker_width / 2
                 if position in selected:
-                    fill, stroke = (0.21, 0.66, 0.36), (0.09, 0.45, 0.23)
+                    alpha = position_fractions.get(position, 1.0)
+                    fill = tuple(1 - alpha + channel * alpha for channel in (0.21, 0.66, 0.36))
+                    stroke = (0.09, 0.45, 0.23)
                 elif position in active:
                     fill, stroke = (1, 1, 1), (0.60, 0.65, 0.69)
                 else:

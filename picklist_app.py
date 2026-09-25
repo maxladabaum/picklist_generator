@@ -41,6 +41,7 @@ from picklist_core import (
     parse_vector,
     parse_source2,
     replacement_names,
+    replacement_fractions,
     separate_mixing_recipes,
     valid_well_list,
     write_csv,
@@ -126,6 +127,10 @@ class SetView:
         self.title = title
         self.path_var = tk.StringVar(value=str(csv_path))
         self.excess_multiplier = tk.StringVar(value="5" if title in {"PAINT P1", "PAINT R1"} else "1")
+        self.replacement_percentage = tk.StringVar(value="100%")
+        self.site_fractions: Dict[str, float] = {}
+        self.transfer_volume_nl = 50
+        self.replacement_error = tk.StringVar()
         self.plate_name = plate_name
         self.variables: Dict[str, tk.BooleanVar] = {}
         self.buttons: Dict[str, tk.Checkbutton] = {}
@@ -154,6 +159,12 @@ class SetView:
         excess_bar.pack(fill="x", padx=12, pady=4)
         ttk.Label(excess_bar, text="Excess Multiplier").pack(side="left")
         ttk.Entry(excess_bar, textvariable=self.excess_multiplier, width=8).pack(side="left", padx=8)
+        ttk.Label(excess_bar, text="Replacement % for new selections").pack(side="left", padx=(12, 0))
+        self.percentage_picker = ttk.Combobox(
+            excess_bar, textvariable=self.replacement_percentage, width=12, state="readonly")
+        self.percentage_picker.pack(side="left", padx=8)
+        ttk.Label(scroll.inner, text="Selected sites keep their percentage. Deselect and reselect to change it.").pack(anchor="w", padx=12)
+        ttk.Label(scroll.inner, textvariable=self.replacement_error, foreground="#a40000").pack(anchor="w", padx=12)
         panel_bar = ttk.Frame(scroll.inner)
         panel_bar.pack(fill="x", padx=12, pady=(5, 2))
         ttk.Label(panel_bar, text="Panel:").pack(side="left")
@@ -200,6 +211,30 @@ class SetView:
         self.panel_host.pack(fill="both", expand=True, padx=10, pady=6)
         self.refresh()
         self.circle_radius_var.trace_add("write", self._circle_radius_changed)
+        self.excess_multiplier.trace_add("write", lambda *_args: self.update_percentage_options(self.transfer_volume_nl))
+        self.update_percentage_options(self.transfer_volume_nl)
+
+    def update_percentage_options(self, volume) -> None:
+        self.transfer_volume_nl = volume
+        try:
+            fractions = replacement_fractions(float(volume), float(self.excess_multiplier.get()))
+            self.replacement_error.set("")
+        except ValueError as exc:
+            fractions = [1.0]
+            self.replacement_error.set("Partial replacement unavailable: {}".format(exc))
+        self._fraction_options = {"{:.10g}%".format(f * 100): f for f in fractions}
+        self.percentage_picker.configure(values=list(self._fraction_options))
+        if self.replacement_percentage.get() not in self._fraction_options:
+            self.replacement_percentage.set("100%")
+        if any(not any(math.isclose(f, option, rel_tol=0, abs_tol=1e-9) for option in fractions)
+               for f in self.site_fractions.values()):
+            self.replacement_error.set("Some selected percentages do not fit this volume. Restore the volume or reselect those sites.")
+
+    def _selected_highlight(self, name: str, background: str, highlight: str) -> str:
+        alpha = self.site_fractions.get(name, 1.0)
+        base = [int(background[i:i + 2], 16) for i in (1, 3, 5)]
+        color = [int(highlight[i:i + 2], 16) for i in (1, 3, 5)]
+        return "#{:02x}{:02x}{:02x}".format(*(round(b * (1 - alpha) + c * alpha) for b, c in zip(base, color)))
 
     def _circle_radius_changed(self, *_args):
         try:
@@ -225,6 +260,7 @@ class SetView:
     def refresh(self) -> None:
         self._clear_panel_cache()
         self.variables.clear()
+        self.site_fractions.clear()
         self.buttons.clear()
         self.circle_sites.clear()
         self.color_frames.clear()
@@ -465,8 +501,9 @@ class SetView:
         if circle is not None:
             canvas, ring, dot, color = circle
             selected = self.variables[name].get()
-            color = self.CONFLICT_BG if selected and name in self.conflicts else ("#00ffff" if selected else color)
-            canvas.itemconfigure(ring, outline=color, fill="#00ffff" if selected else "",
+            highlight = self._selected_highlight(name, canvas.cget("background"), "#00ffff")
+            color = self.CONFLICT_BG if selected and name in self.conflicts else (highlight if selected else color)
+            canvas.itemconfigure(ring, outline=color, fill=highlight if selected else "",
                                  width=3 if selected else 1.5)
             canvas.itemconfigure(dot, fill=color)
             return
@@ -476,15 +513,21 @@ class SetView:
             return
         selected = variable.get()
         conflict = selected and name in self.conflicts
+        highlight = self._selected_highlight(name, self.SELECTABLE_BG, self.SELECTED_BG)
         button.configure(
             text="×" if conflict else ("✓" if selected else ""),
-            background=self.CONFLICT_BG if conflict else (self.SELECTED_BG if selected else self.SELECTABLE_BG),
-            activebackground=self.CONFLICT_BG if conflict else (self.SELECTED_BG if selected else self.SELECTABLE_HOVER_BG),
+            background=self.CONFLICT_BG if conflict else (highlight if selected else self.SELECTABLE_BG),
+            activebackground=self.CONFLICT_BG if conflict else (highlight if selected else self.SELECTABLE_HOVER_BG),
+            selectcolor=self.CONFLICT_BG if conflict else highlight,
             foreground="#ffffff" if selected else "#222222",
             relief="sunken" if selected else "raised",
         )
 
     def _on_square_toggled(self, name: str) -> None:
+        if self.variables[name].get():
+            self.site_fractions[name] = self._fraction_options[self.replacement_percentage.get()]
+        else:
+            self.site_fractions.pop(name, None)
         self.mark_conflicts(set())
         self._paint_square(name)
         self._update_selection_summary()
@@ -513,6 +556,7 @@ class SetView:
 
     def clear(self) -> None:
         self.conflicts.clear()
+        self.site_fractions.clear()
         for name, variable in self.variables.items():
             variable.set(False)
             self._paint_square(name)
@@ -1704,6 +1748,7 @@ class PicklistApp(tk.Tk):
         self.last_run_committed = False
         self.last_run_saved = False
         self.last_run_stored = False
+        self._advancing_destination = False
         self._build()
 
     def _set_style(self) -> None:
@@ -1783,6 +1828,11 @@ class PicklistApp(tk.Tk):
         for view in self.set_views:
             view.path_var.trace_add("write", lambda *_args: self._selections_changed())
         self._build_settings(settings_page, main_tabs, preview_page)
+        def update_percentage_options(*_args):
+            for view in self.set_views:
+                view.update_percentage_options(self.transfer_volume.get())
+        self.transfer_volume.trace_add("write", update_percentage_options)
+        update_percentage_options()
         plate_actions = ttk.Frame(plate_page, padding=(12, 10, 12, 0))
         plate_actions.pack(fill="x")
         ttk.Button(plate_actions, text="Start fresh plate", command=self._start_fresh_plate).pack(side="left")
@@ -1795,6 +1845,7 @@ class PicklistApp(tk.Tk):
         self._build_storage(storage_page)
         self._build_preview(preview_page)
         self._bind_config_updates()
+        self._bind_preview_updates()
         self._refresh_plate_view()
         self.protocol("WM_DELETE_WINDOW", self._close_app)
 
@@ -1882,6 +1933,7 @@ class PicklistApp(tk.Tk):
                             "active": sorted(active),
                             "selected": selected,
                             "selected_names": names,
+                            "site_fractions": {name: view.site_fractions.get(name, 1.0) for name in names},
                             "spacing_x_nm": panel.get("spacing_x_nm"),
                             "spacing_y_nm": panel.get("spacing_y_nm"),
                             "mirror_columns": bool(panel.get("mirror_columns", False)),
@@ -1930,6 +1982,7 @@ class PicklistApp(tk.Tk):
         self.clash_text.configure(state="disabled")
 
     def _selections_changed(self) -> None:
+        self._invalidate_preview()
         self._lock_run_settings()
         for view in self.set_views:
             view.mark_conflicts(set())
@@ -2048,6 +2101,28 @@ class PicklistApp(tk.Tk):
         )
         for variable in variables:
             variable.trace_add("write", lambda *_args: self._schedule_config_save())
+
+    def _bind_preview_updates(self) -> None:
+        variables = (
+            self.base_path, self.destination_wells, self.destination_plate,
+            self.source_plate_type, self.transfers_per_source, self.transfer_volume,
+            self.max_volume, self.hinge_type, self.staple, self.scaffold,
+            self.magnesium, self.sodium, self.te_10x, self.desired,
+            *(view.excess_multiplier for view in self.set_views),
+        )
+        for variable in variables:
+            variable.trace_add("write", self._invalidate_preview)
+
+    def _invalidate_preview(self, *_args) -> None:
+        if self._advancing_destination or not (self.last_picklist or self.last_mix):
+            return
+        self.last_picklist = []
+        self.last_mix = []
+        self._fill_tree(self.pick_tree, [], PICKLIST_COLUMNS)
+        self._fill_tree(self.mix_tree, [], ("Reagent", "Volume_uL"))
+        self.summary.set("Inputs changed — generate a new preview.")
+        self.status.set("Inputs changed — generate a new preview before saving or storing.")
+        self._update_result_action_buttons()
 
     def _schedule_config_save(self) -> None:
         if self._config_save_job is not None:
@@ -2436,7 +2511,13 @@ class PicklistApp(tk.Tk):
             self.plate_state, destination_plate, len(used_destination_wells) or 1
         )
         self.starting_well.set("")
-        self.destination_wells.set(",".join(next_destination_wells))
+        # Advancing to the next run's wells must preserve this committed preview
+        # so it can still be saved after storage (or stored after saving).
+        self._advancing_destination = True
+        try:
+            self.destination_wells.set(",".join(next_destination_wells))
+        finally:
+            self._advancing_destination = False
         self.config["last_committed_run"] = {
             "committed_utc": self.plate_state.get("updated_utc"),
             "run_id": self.last_run_id,
@@ -2654,7 +2735,10 @@ class PicklistApp(tk.Tk):
                         multiplier = float(view.excess_multiplier.get())
                     except ValueError:
                         raise ValueError("{} Excess Multiplier must be a positive number.".format(view.title))
-                    selections.append(ReplacementSelection(Path(view.path_var.get()), names, view.plate_name, multiplier))
+                    selections.append(ReplacementSelection(
+                        Path(view.path_var.get()), names, view.plate_name, multiplier,
+                        site_fractions={name: view.site_fractions.get(name, 1.0) for name in names},
+                    ))
                     design_names.extend(names)
             if not selections:
                 raise ValueError("Select at least one replacement.")

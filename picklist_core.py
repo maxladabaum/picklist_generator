@@ -32,6 +32,23 @@ class ReplacementSelection:
     selected_names: Sequence[str]
     plate_name: str
     excess_multiplier: float = 1.0
+    replacement_fraction: float = 1.0
+    site_fractions: Optional[Dict[str, float]] = None
+
+
+def replacement_fractions(transfer_volume_nl: float, excess_multiplier: float = 1.0) -> List[float]:
+    """Return splits whose two transfers are whole 25 nL droplets."""
+    if not math.isfinite(transfer_volume_nl) or transfer_volume_nl <= 0 or not math.isclose(
+        transfer_volume_nl / 25, round(transfer_volume_nl / 25), abs_tol=1e-9
+    ):
+        raise ValueError("Transfer volume must be a positive multiple of 25 nL.")
+    if not math.isfinite(excess_multiplier) or excess_multiplier <= 0:
+        raise ValueError("Excess Multiplier must be a finite positive number.")
+    droplets = transfer_volume_nl * excess_multiplier / 25
+    if not math.isfinite(droplets) or not math.isclose(droplets, round(droplets), abs_tol=1e-9) or droplets < 1:
+        raise ValueError("Transfer volume × Excess Multiplier must be a positive multiple of 25 nL.")
+    count = round(droplets)
+    return [index / count for index in range(count + 1)]
 
 
 def _clean(value: object) -> str:
@@ -199,12 +216,31 @@ def generate_picklist(
     selected_replacements: List[Dict[str, object]] = []
     targets: Dict[str, Tuple[Path, str]] = {}
 
+    retained_volumes: Dict[str, float] = {}
     for selection in replacements:
         if not math.isfinite(selection.excess_multiplier) or selection.excess_multiplier <= 0:
             raise ValueError("Excess Multiplier must be a finite positive number: {}".format(selection.csv_path))
+        overrides = selection.site_fractions or {}
+        unknown = set(overrides) - set(selection.selected_names)
+        if unknown:
+            raise ValueError("Per-site percentages reference unselected replacements: {}".format(", ".join(sorted(unknown))))
+        total_volume = transfer_volume_nl * selection.excess_multiplier
         replacement_rows, file_plate_name = parse_source2(Path(selection.csv_path))
         plate_name = _clean(selection.plate_name) or file_plate_name
         for row in _selected_rows(replacement_rows, selection.selected_names):
+            fraction = overrides.get(row["Name"], selection.replacement_fraction)
+            if not math.isfinite(fraction) or not 0 <= fraction <= 1:
+                raise ValueError("Replacement percentage must be between 0% and 100%: {}".format(row["Name"]))
+            replacement_volume = total_volume * fraction
+            original_volume = total_volume * (1 - fraction)
+            # Preserve existing full-replacement volumes; partial splits require
+            # whole droplets for both source wells, as in the reference app.
+            if 0 < fraction < 1:
+                if any(not math.isclose(volume / 25, round(volume / 25), rel_tol=0, abs_tol=1e-9)
+                       for volume in (replacement_volume, original_volume)):
+                    raise ValueError("Replacement percentage must produce transfers in 25 nL increments: {}".format(row["Name"]))
+                replacement_volume = round(replacement_volume / 25) * 25
+                original_volume = round(original_volume / 25) * 25
             target = row["Replace Well"].upper()
             if target in targets:
                 prior_path, prior_name = targets[target]
@@ -214,19 +250,25 @@ def generate_picklist(
                     )
                 )
             targets[target] = (Path(selection.csv_path), row["Name"])
+            retained_volumes[target] = original_volume
+            if original_volume and not any(base.get("Replacement Well", base["Well"]).upper() == target for base in base_rows):
+                raise ValueError("Original staple not found for replacement target {}.".format(target))
+            if not replacement_volume:
+                continue
             selected_replacements.append(
                 {
                     "Well": row["Well"],
                     "Sequence": row["Sequence"],
                     "Source Plate Name": plate_name,
-                    "Transfer Volume": transfer_volume_nl * selection.excess_multiplier,
+                    "Transfer Volume": replacement_volume,
                 }
             )
 
     active = [
-        {"Well": row["Well"], "Sequence": row["Sequence"], "Source Plate Name": base_plate_name}
+        {"Well": row["Well"], "Sequence": row["Sequence"], "Source Plate Name": base_plate_name,
+         "Transfer Volume": retained_volumes.get(row.get("Replacement Well", row["Well"]).upper(), transfer_volume_nl)}
         for row in base_rows
-        if row.get("Replacement Well", row["Well"]).upper() not in targets
+        if retained_volumes.get(row.get("Replacement Well", row["Well"]).upper(), transfer_volume_nl) > 0
     ]
     active.extend(selected_replacements)
 

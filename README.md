@@ -26,6 +26,19 @@ keep the normal transfer volume. Positive decimal multipliers are supported.
 Destination capacity, available volume, and the mixing recipe account for the
 scaled transfers; the desired staple concentration refers to the nominal 1× staples.
 
+Each replacement tab also has **Replacement % for new selections**. Choose a
+percentage, then select extension sites. Each site remembers that percentage and
+keeps its corresponding highlight opacity, so one design can contain multiple
+percentages. Changing the picker does not alter existing selections. To change a
+site, deselect it and select it again with the new percentage.
+
+Percentages split the excess-adjusted volume between replacement and original
+staple. For example, 25 nL at 5× excess and 40% replacement transfers 50 nL of
+replacement and 75 nL of original staple. Available splits use 25 nL increments.
+Changing the transfer volume or excess does not overwrite stored percentages;
+incompatible splits must be resolved before generating a preview. Mixing recipes
+include both portions. Stored runs and selection PDFs preserve each percentage.
+
 **miRNA** loads `replacement_sheets/miRNA_replace.csv` from the supplied Source [3]
 anchor sheet, using `Well` as the source well and `Replace` as the base replacement
 key. The source plate is `SourcePlate3[3]`. Its two 8×12 panels infer sites from
