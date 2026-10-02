@@ -7,6 +7,20 @@ from selection_report import _page_commands
 
 
 class ReplacementPercentageTests(unittest.TestCase):
+    def test_individual_concentrations_on_same_plate(self):
+        rows = generate_picklist(self.base, [ReplacementSelection(
+            self.replacement, ["R1", "R2"], "Replacement", desired_concentration_nm=50,
+            site_concentrations_nm={"R1": 100, "R2": 25},
+            site_fractions={"R1": 0.5},
+        )], ["A01"], transfer_volume_nl=50)
+        self.assertEqual({row["Source Well"]: row["Transfer Volume"] for row in rows},
+                         {"A01": 50, "B01": 50, "B02": 25})
+        for overrides in ({"R1": 0}, {"R1": float("nan")}, {"unknown": 100}, {"R1": 30}):
+            with self.subTest(overrides=overrides), self.assertRaises(ValueError):
+                generate_picklist(self.base, [ReplacementSelection(
+                    self.replacement, ["R1"], "Replacement", site_concentrations_nm=overrides,
+                )], ["A01"])
+
     def setUp(self):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
@@ -18,7 +32,7 @@ class ReplacementPercentageTests(unittest.TestCase):
     def generate(self, fractions, repeats=1):
         return generate_picklist(
             self.base, [ReplacementSelection(self.replacement, ["R1", "R2"], "Replacement",
-                                            2, site_fractions=fractions)], ["A01"],
+                                            100, site_fractions=fractions)], ["A01"],
             transfer_volume_nl=50, transfers_per_source=repeats)
 
     def test_independent_splits_preserve_total_and_repeats(self):
@@ -38,8 +52,62 @@ class ReplacementPercentageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unselected"):
             self.generate({"unknown": 0.5})
 
-    def test_options_follow_excess_adjusted_volume(self):
-        self.assertEqual(replacement_fractions(25, 5), [0, 0.2, 0.4, 0.6, 0.8, 1])
+    def test_options_follow_desired_concentration(self):
+        self.assertEqual(replacement_fractions(25, 250), [0, 0.2, 0.4, 0.6, 0.8, 1])
+
+    def test_mixed_concentrations_preserve_molar_splits(self):
+        rows = generate_picklist(
+            self.base, [
+                ReplacementSelection(self.replacement, ["R1"], "LowConc", 250,
+                                     site_fractions={"R1": 0.4}, concentration_nm=20000),
+                ReplacementSelection(self.replacement, ["R2"], "Standard"),
+            ], ["A01"], transfer_volume_nl=25,
+        )
+        volumes = {r["Source Well"]: r["Transfer Volume"] for r in rows}
+        self.assertEqual(volumes, {"A01": 75, "B01": 500, "B02": 25})
+        replacement_amount = volumes["B01"] * 20000
+        original_amount = volumes["A01"] * 200000
+        self.assertAlmostEqual(replacement_amount / (replacement_amount + original_amount), 0.4)
+
+    def test_low_concentration_capacity_and_droplet_checks(self):
+        selection = ReplacementSelection(self.replacement, ["R1"], "LowConc", concentration_nm=20000)
+        rows = generate_picklist(self.base, [selection], ["A01", "A02"],
+                                 transfer_volume_nl=50, max_destination_volume_ul=0.5)
+        self.assertEqual([r["Destination Well"] for r in rows], ["A01", "A02"])
+        with self.assertRaisesRegex(ValueError, "capacity"):
+            generate_picklist(self.base, [selection], ["A01"], max_destination_volume_ul=0.4)
+        with self.assertRaisesRegex(ValueError, "25 nL"):
+            generate_picklist(self.base, [selection], ["A01"], base_concentration_nm=205000)
+
+    def test_invalid_stock_concentrations(self):
+        for concentration in (0, -1, float("nan"), float("inf")):
+            with self.subTest(concentration=concentration):
+                selection = ReplacementSelection(self.replacement, ["R1"], "LowConc",
+                                                 concentration_nm=concentration)
+                with self.assertRaisesRegex(ValueError, "concentration"):
+                    generate_picklist(self.base, [selection], ["A01"])
+                with self.assertRaisesRegex(ValueError, "concentration"):
+                    generate_picklist(self.base, [], ["A01"], base_concentration_nm=concentration)
+
+    def test_percentage_options_check_both_stock_volumes(self):
+        self.assertEqual(replacement_fractions(25, 250, concentration_ratio=10), [0, 0.2, 0.4, 0.6, 0.8, 1])
+        self.assertEqual(replacement_fractions(100, 50, concentration_ratio=0.5), [0, 0.5, 1])
+        self.assertEqual(replacement_fractions(50, 5, concentration_ratio=10), [1])
+        self.assertEqual(replacement_fractions(500, 5, concentration_ratio=10), [0, 0.5, 1])
+
+    def test_invalid_final_concentration_targets(self):
+        for target in (0, -1, float("nan"), float("inf")):
+            with self.subTest(target=target), self.assertRaisesRegex(ValueError, "concentration"):
+                generate_picklist(self.base, [ReplacementSelection(
+                    self.replacement, ["R1"], "LowConc", desired_concentration_nm=target,
+                )], ["A01"])
+
+    def test_unachievable_target_rejected_instead_of_rounded(self):
+        with self.assertRaisesRegex(ValueError, "25 nL"):
+            generate_picklist(self.base, [ReplacementSelection(
+                self.replacement, ["R1"], "LowConc", concentration_nm=20000,
+                desired_concentration_nm=6,
+            )], ["A01"], transfer_volume_nl=50, base_desired_concentration_nm=50)
 
     def test_report_keeps_individual_percentages(self):
         panel = {"rows": ["Top"], "columns": ["1", "2"], "selected": [("Top", "1"), ("Top", "2")],

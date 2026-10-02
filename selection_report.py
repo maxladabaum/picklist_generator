@@ -59,8 +59,16 @@ def _rect(x: float, top: float, width: float, height: float, fill, stroke=(0.72,
 
 def _selection_labels(panel: Dict[str, object]) -> List[str]:
     fractions = panel.get("site_fractions", {})
-    return ["{} ({:g}%)".format(name, fractions.get(name, 1.0) * 100)
-            if fractions else str(name) for name in panel.get("selected_names", [])]
+    concentrations = panel.get("site_concentrations_nm", {})
+    labels = []
+    for name in panel.get("selected_names", []):
+        details = []
+        if fractions:
+            details.append("{:g}%".format(fractions.get(name, 1.0) * 100))
+        if name in concentrations:
+            details.append("{:g} nM".format(concentrations[name]))
+        labels.append("{} ({})".format(name, ", ".join(details)) if details else str(name))
+    return labels
 
 
 def _card_height(panel: Dict[str, object]) -> int:

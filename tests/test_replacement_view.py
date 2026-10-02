@@ -9,6 +9,55 @@ from types import SimpleNamespace
 
 
 class ReplacementViewTests(unittest.TestCase):
+    def test_site_targets_and_labels_follow_overrides_or_plate_default(self):
+        view = self.view
+        names = [name for name in view.circle_sites if view.selectable[name]][:2]
+        view.new_selection_concentration.set("100")
+        view.variables[names[0]].set(True)
+        view._on_square_toggled(names[0])
+        view.new_selection_concentration.set("")
+        view.variables[names[1]].set(True)
+        view._on_square_toggled(names[1])
+        view.desired_concentration_nm.set("25")
+        self.assertEqual(view.site_target(names[0]), 100)
+        self.assertEqual(view.site_target(names[1]), 25)
+        for name, expected in zip(names, ("100 nM", "25 nM")):
+            canvas, ring, _, _ = view.circle_sites[name]
+            self.assertEqual(canvas.itemcget("target_{}".format(ring), "text"), expected)
+        panels = PicklistApp._replacement_selection_panels(SimpleNamespace(set_views=[view]))
+        self.assertEqual(panels[0]["site_concentrations_nm"], dict(zip(names, (100, 25))))
+        view.variables[names[0]].set(False)
+        view._on_square_toggled(names[0])
+        self.assertNotIn(names[0], view.site_concentrations_nm)
+        view.variables[names[0]].set(True)
+        view._on_square_toggled(names[0])
+        self.assertEqual(view.site_target(names[0]), 25)
+        view.clear()
+        self.assertFalse(view.site_concentrations_nm)
+        canvas, ring, _, _ = view.circle_sites[names[0]]
+        self.assertEqual(canvas.itemcget("target_{}".format(ring), "text"), "")
+
+    def test_invalid_selection_target_does_not_select_site(self):
+        view = self.view
+        name = next(name for name in view.circle_sites if view.selectable[name])
+        for value in ("0", "-5", "nan", "oops"):
+            view.new_selection_concentration.set(value)
+            view.variables[name].set(True)
+            view._on_square_toggled(name)
+            self.assertFalse(view.variables[name].get())
+            self.assertNotIn(name, view.site_concentrations_nm)
+
+    def test_button_sites_show_target_text(self):
+        title, filename, plate, panels = next(item for item in panel_definitions() if item[0] == "Aptamers")
+        view = SetView(self.root, title, SHEET_DIR / filename, plate, panels)
+        name = next(name for name in view.buttons if view.selectable[name])
+        view.new_selection_concentration.set("100")
+        view.variables[name].set(True)
+        view._on_square_toggled(name)
+        self.assertEqual(view.buttons[name].cget("text"), "100 nM")
+        view.mark_conflicts({name})
+        self.assertIn("100 nM", view.buttons[name].cget("text"))
+
     def setUp(self):
         try:
             self.root = tk.Tk()
@@ -18,6 +67,28 @@ class ReplacementViewTests(unittest.TestCase):
         self.addCleanup(self.root.destroy)
         title, filename, plate, panels = panel_definitions()[0]
         self.view = SetView(self.root, title, SHEET_DIR / filename, plate, panels)
+
+    def test_low_concentration_r1_reuses_layout_with_distinct_stock(self):
+        definitions = {title: (filename, plate, panels)
+                       for title, filename, plate, panels in panel_definitions()}
+        standard_file, standard_plate, standard_panels = definitions["PAINT R1"]
+        filename, plate, panels = definitions["LowConc PAINT R1"]
+        self.assertEqual(filename, standard_file)
+        self.assertEqual(panels, standard_panels)
+        self.assertNotEqual(plate, standard_plate)
+        view = SetView(self.root, "LowConc PAINT R1", SHEET_DIR / filename, plate, panels)
+        self.assertEqual(view.concentration_nm, 20000)
+        self.assertEqual(view.desired_concentration_nm.get(), "5")
+        view.desired_concentration_nm.set("250")
+        view.update_percentage_options(25)
+        self.assertEqual(list(view._fraction_options), ["0%", "20%", "40%", "60%", "80%", "100%"])
+        self.assertTrue(any(view.selectable.values()))
+        view.desired_concentration_nm.set("5")
+        view.update_percentage_options(50)
+        self.assertEqual(list(view._fraction_options), ["100%"])
+        self.assertEqual(view.replacement_error.get(), "")
+        view.update_percentage_options(500)
+        self.assertEqual(list(view._fraction_options), ["0%", "50%", "100%"])
 
     def test_switching_back_reuses_graphic_and_preserves_selection(self):
         view = self.view
@@ -65,7 +136,7 @@ class ReplacementViewTests(unittest.TestCase):
 
     def test_percentages_and_colors_are_locked_per_selection(self):
         view = self.view
-        view.excess_multiplier.set("1")
+        view.desired_concentration_nm.set("50")
         view.update_percentage_options(100)
         names = [name for name in view.circle_sites if view.selectable[name]][:2]
         colors = []

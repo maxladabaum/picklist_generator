@@ -2,7 +2,7 @@
 
 A standalone desktop version of the GUI and picklist workflow from
 `picklist_generator_replacement-Copy1.ipynb`. Yaritza Extensions, Aptamers,
-MB, PAINT P1, PAINT R1, and the base source sheet are loaded
+MB, PAINT P1, PAINT R1, LowConc PAINT R1, and the base source sheet are loaded
 automatically with portable, relative paths. The
 original Set B CSV remains archived in `replacement_sheets/` but is not loaded
 or shown by the application.
@@ -18,13 +18,22 @@ the picklist. Targets B21, B22, and B20 are translated to logical replacement
 keys B11, B14, and L14, respectively, to account for relocated base staples.
 These selections participate in the existing clash checks, previews, and storage.
 
-Each replacement tab has an **Excess Multiplier**, initially **1**, also editable
-in **Run & Mixing Settings**. Values are independent per tab and stay synchronized
-between the two locations. For example, PAINT R1 at **5** with a **25 nL** transfer
-volume produces **125 nL** transfers for its selected replacements. Base staples
-keep the normal transfer volume. Positive decimal multipliers are supported.
-Destination capacity, available volume, and the mixing recipe account for the
-scaled transfers; the desired staple concentration refers to the nominal 1× staples.
+**LowConc PAINT R1** uses the same `PAINT_R1_replace.csv` layout, sequences,
+and replacement targets as PAINT R1, with a separate source plate label
+`SourcePlate7[7]`. Its stock is **20 µM (20,000 nM)**; all other replacement
+tabs use **200 µM (200,000 nM)**. Stock concentrations are shown in each tab
+and in the run settings. Selecting the same target from both R1 tabs is a clash.
+
+Each replacement tab has a **Desired staple (nM)** field, also editable in
+**Run & Mixing Settings → Mixing recipe**. Values are independent per plate
+and synchronized between the two locations. Defaults are **50 nM** for standard
+replacement plates and **5 nM** for LowConc PAINT R1. Every selected plate needs
+a positive target; blank entries are rejected.
+
+Transfers are calculated from each plate's desired final concentration and
+stock concentration relative to the base staple target and stock. Destination
+capacity, available pool volume, and the mixing recipe use the resulting
+physical volumes, including the extra liquid required by dilute stocks.
 
 Each replacement tab also has **Replacement % for new selections**. Choose a
 percentage, then select extension sites. Each site remembers that percentage and
@@ -32,10 +41,32 @@ keeps its corresponding highlight opacity, so one design can contain multiple
 percentages. Changing the picker does not alter existing selections. To change a
 site, deselect it and select it again with the new percentage.
 
-Percentages split the excess-adjusted volume between replacement and original
-staple. For example, 25 nL at 5× excess and 40% replacement transfers 50 nL of
-replacement and 75 nL of original staple. Available splits use 25 nL increments.
-Changing the transfer volume or excess does not overwrite stored percentages;
+Use **New selections (nM; blank = default)** beside the percentage control to
+give individual sites their own concentration. Enter a target, then click the
+sites that should use it. Those overrides stay fixed when the plate default
+changes. Leave the control blank to select sites that follow the plate default.
+To change a site's override or reset it to the default, deselect it, set this
+control, and select it again. Every selected location displays its effective
+target in nM (before the replacement percentage splits it). These per-site
+targets are used in transfers and recipes and retained in stored selection
+reports and PDFs.
+
+In **Run & Mixing Settings → Mixing recipe**, **Desired replacement staple
+concentrations (nM)** lets you set a separate final concentration per staple for
+each replacement plate. The staple nM value in the Desired vector refers to
+**base staples**; each replacement plate has its own required target.
+For example, set the base target to 50 nM, PAINT P1 to 50 nM, and LowConc PAINT R1
+to 5 nM. With a 50 nL base transfer and the default stock concentrations, both
+replacement plates transfer 50 nL per fully replaced site. The pooled aliquot
+and recipe preserve these different final concentrations.
+
+For partial replacements, the percentage splits the plate's target between
+replacement and original staples: a 40% split of a 50 nM target gives 20 nM
+replacement and 30 nM original. Transfers must fit whole 25 nL droplets; increase
+the base transfer volume or adjust the target/percentage if needed. Editing any
+target invalidates the previous preview so exports require recalculation.
+
+Changing a target or transfer volume does not overwrite stored percentages;
 incompatible splits must be resolved before generating a preview. Mixing recipes
 include both portions. Stored runs and selection PDFs preserve each percentage.
 
@@ -234,6 +265,10 @@ two replacements for the same base well is rejected. Transfers are assigned to
 destination wells in order, up to the configured volume capacity.
 
 The mixing fields retain the notebook's comma-separated vector format. The
+**Base staple** concentration applies to the base source plate; replacement
+stock concentrations are defined separately per tab. The staple buffer values
+(xTE, Mg, Na) remain shared across staple stocks; LowConc uses the same buffer
+composition as the other plates. The
 water balance fixes a notebook arithmetic omission by subtracting sodium along
 with the other reagent volumes, so the recipe sums to the requested final
 volume.
@@ -274,3 +309,19 @@ Paint Analysis uses this flag to avoid reflecting an already mirrored image.
 Legacy calibrated images without the flag retain the previous import behavior
 (horizontal reflection). Logical sites and column offsets remain canonical in
 both export orientations and are transformed independently by analysis.
+
+### Digital-group brightness factors
+
+In the template editor's **Custom digital-bit groups** tab, select a group,
+enter its **Brightness factor**, and click **Update group** (or set it before
+**Create group**). Save the bit schema JSON and load it in PAINT Analysis Step 3.
+Use `1` for normal signal, `2` for a group expected to need twice the signal,
+and `0.2` for a group that may pass with one-fifth the signal.
+
+Each `logical_bits` entry stores an optional positive finite `brightness_factor`;
+missing values default to `1`. Schema JSON, template PNG metadata, and template
+JSON sidecars preserve this value. PAINT Analysis divides weighted localization
+support by both the number of group positions and this factor before its usual
+support, prominence, and probability checks. After loading a changed schema,
+rerun analysis Steps 3 and 4. This calibration affects digital-bit detection;
+it does not change rendered template spots or physical mixing volumes.

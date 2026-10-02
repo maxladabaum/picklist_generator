@@ -209,6 +209,10 @@ def normalize_logical_bit_schema(
             next_color_index += 1
             group["physical_sites"] = normalized_sites("physical_sites")
             if evidence:
+                factor = raw_group.get("brightness_factor", 1.0)
+                if isinstance(factor, bool) or not isinstance(factor, (int, float)) or not math.isfinite(factor) or factor <= 0:
+                    raise ValueError(f"{group_id}.brightness_factor must be a positive finite number.")
+                group["brightness_factor"] = float(factor)
                 if "evidence_sites" in raw_group:
                     group["evidence_sites"] = normalized_sites("evidence_sites")
                 else:

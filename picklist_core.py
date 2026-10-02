@@ -31,24 +31,54 @@ class ReplacementSelection:
     csv_path: Path
     selected_names: Sequence[str]
     plate_name: str
-    excess_multiplier: float = 1.0
+    desired_concentration_nm: float = 50.0
     replacement_fraction: float = 1.0
     site_fractions: Optional[Dict[str, float]] = None
+    concentration_nm: float = 200000.0
+    site_concentrations_nm: Optional[Dict[str, float]] = None
 
 
-def replacement_fractions(transfer_volume_nl: float, excess_multiplier: float = 1.0) -> List[float]:
+def desired_concentration_ratio(
+    desired_concentration_nm: float, base_desired_concentration_nm: float,
+) -> float:
+    """Validate final targets and return their molar ratio."""
+    for label, value in (("base staple", base_desired_concentration_nm),
+                         ("replacement", desired_concentration_nm)):
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("Desired {} concentration must be a finite positive number.".format(label))
+    return desired_concentration_nm / base_desired_concentration_nm
+
+
+def replacement_fractions(
+    transfer_volume_nl: float, desired_concentration_nm: float = 50.0,
+    base_desired_concentration_nm: float = 50.0, concentration_ratio: float = 1.0,
+) -> List[float]:
     """Return splits whose two transfers are whole 25 nL droplets."""
     if not math.isfinite(transfer_volume_nl) or transfer_volume_nl <= 0 or not math.isclose(
         transfer_volume_nl / 25, round(transfer_volume_nl / 25), abs_tol=1e-9
     ):
         raise ValueError("Transfer volume must be a positive multiple of 25 nL.")
-    if not math.isfinite(excess_multiplier) or excess_multiplier <= 0:
-        raise ValueError("Excess Multiplier must be a finite positive number.")
-    droplets = transfer_volume_nl * excess_multiplier / 25
-    if not math.isfinite(droplets) or not math.isclose(droplets, round(droplets), abs_tol=1e-9) or droplets < 1:
-        raise ValueError("Transfer volume × Excess Multiplier must be a positive multiple of 25 nL.")
-    count = round(droplets)
-    return [index / count for index in range(count + 1)]
+    droplets = transfer_volume_nl * desired_concentration_ratio(
+        desired_concentration_nm, base_desired_concentration_nm) / 25
+    if not math.isfinite(droplets) or droplets <= 0:
+        raise ValueError("Target transfer volume must be finite and positive.")
+    if not math.isfinite(concentration_ratio) or concentration_ratio <= 0:
+        raise ValueError("Stock concentrations must be finite positive numbers.")
+    if math.isclose(droplets, round(droplets), rel_tol=0, abs_tol=1e-9):
+        count = round(droplets)
+        candidates = [index / count for index in range(count + 1)] if count else [1.0]
+    else:
+        # The retained base portion must be whole droplets even when the
+        # target is below the base concentration. A full replacement can still
+        # be possible because its stock is more dilute.
+        candidates = [1 - original / droplets for original in range(math.floor(droplets), -1, -1)]
+    fractions = [fraction for fraction in candidates
+                 if math.isclose(droplets * fraction * concentration_ratio,
+                                 round(droplets * fraction * concentration_ratio),
+                                 rel_tol=0, abs_tol=1e-9)]
+    if not fractions:
+        raise ValueError("Target and stock concentrations do not allow transfers in 25 nL increments.")
+    return fractions
 
 
 def _clean(value: object) -> str:
@@ -204,6 +234,8 @@ def generate_picklist(
     max_destination_volume_ul: float = 12.5,
     transfers_per_source: int = 1,
     hinge_type: str = "original",
+    base_concentration_nm: float = 200000.0,
+    base_desired_concentration_nm: float = 50.0,
 ) -> List[Dict[str, object]]:
     """Apply replacements and build Echo-format transfer rows."""
     destinations = [_clean(well).upper() for well in destination_wells if _clean(well)]
@@ -211,6 +243,8 @@ def generate_picklist(
         raise ValueError("Enter at least one destination well.")
     if transfer_volume_nl <= 0 or max_destination_volume_ul <= 0 or transfers_per_source <= 0:
         raise ValueError("Transfer volume, destination capacity, and transfers/source must be positive.")
+    if not math.isfinite(base_concentration_nm) or base_concentration_nm <= 0:
+        raise ValueError("Base stock concentration must be a finite positive number.")
 
     base_rows, base_plate_name = parse_source1(Path(base_source_path), hinge_type)
     selected_replacements: List[Dict[str, object]] = []
@@ -218,29 +252,36 @@ def generate_picklist(
 
     retained_volumes: Dict[str, float] = {}
     for selection in replacements:
-        if not math.isfinite(selection.excess_multiplier) or selection.excess_multiplier <= 0:
-            raise ValueError("Excess Multiplier must be a finite positive number: {}".format(selection.csv_path))
+        if not math.isfinite(selection.concentration_nm) or selection.concentration_nm <= 0:
+            raise ValueError("Replacement stock concentration must be a finite positive number: {}".format(selection.csv_path))
+        concentration_ratio = base_concentration_nm / selection.concentration_nm
+        desired_concentration_ratio(
+            selection.desired_concentration_nm,
+            base_desired_concentration_nm,
+        )
         overrides = selection.site_fractions or {}
-        unknown = set(overrides) - set(selection.selected_names)
+        concentrations = selection.site_concentrations_nm or {}
+        unknown = (set(overrides) | set(concentrations)) - set(selection.selected_names)
         if unknown:
             raise ValueError("Per-site percentages reference unselected replacements: {}".format(", ".join(sorted(unknown))))
-        total_volume = transfer_volume_nl * selection.excess_multiplier
         replacement_rows, file_plate_name = parse_source2(Path(selection.csv_path))
         plate_name = _clean(selection.plate_name) or file_plate_name
         for row in _selected_rows(replacement_rows, selection.selected_names):
+            total_volume = transfer_volume_nl * desired_concentration_ratio(
+                concentrations.get(row["Name"], selection.desired_concentration_nm),
+                base_desired_concentration_nm,
+            )
             fraction = overrides.get(row["Name"], selection.replacement_fraction)
             if not math.isfinite(fraction) or not 0 <= fraction <= 1:
                 raise ValueError("Replacement percentage must be between 0% and 100%: {}".format(row["Name"]))
-            replacement_volume = total_volume * fraction
+            replacement_volume = total_volume * fraction * concentration_ratio
             original_volume = total_volume * (1 - fraction)
-            # Preserve existing full-replacement volumes; partial splits require
-            # whole droplets for both source wells, as in the reference app.
-            if 0 < fraction < 1:
-                if any(not math.isclose(volume / 25, round(volume / 25), rel_tol=0, abs_tol=1e-9)
-                       for volume in (replacement_volume, original_volume)):
-                    raise ValueError("Replacement percentage must produce transfers in 25 nL increments: {}".format(row["Name"]))
-                replacement_volume = round(replacement_volume / 25) * 25
-                original_volume = round(original_volume / 25) * 25
+            # Every requested target and split must fit whole Echo droplets.
+            if any(not math.isclose(volume / 25, round(volume / 25), rel_tol=0, abs_tol=1e-9)
+                   for volume in (replacement_volume, original_volume)):
+                raise ValueError("Replacement target and percentage must produce transfers in 25 nL increments: {}. Increase the base transfer volume or adjust the target/percentage.".format(row["Name"]))
+            replacement_volume = round(replacement_volume / 25) * 25
+            original_volume = round(original_volume / 25) * 25
             target = row["Replace Well"].upper()
             if target in targets:
                 prior_path, prior_name = targets[target]

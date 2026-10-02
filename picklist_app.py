@@ -42,6 +42,7 @@ from picklist_core import (
     parse_source2,
     replacement_names,
     replacement_fractions,
+    desired_concentration_ratio,
     separate_mixing_recipes,
     valid_well_list,
     write_csv,
@@ -126,9 +127,14 @@ class SetView:
     ) -> None:
         self.title = title
         self.path_var = tk.StringVar(value=str(csv_path))
-        self.excess_multiplier = tk.StringVar(value="5" if title in {"PAINT P1", "PAINT R1"} else "1")
+        self.concentration_nm = 20000.0 if title == "LowConc PAINT R1" else 200000.0
+        self.base_concentration_nm = 200000.0
+        self.desired_concentration_nm = tk.StringVar(value="5" if title == "LowConc PAINT R1" else "50")
+        self.base_desired_concentration_nm = 50.0
         self.replacement_percentage = tk.StringVar(value="100%")
         self.site_fractions: Dict[str, float] = {}
+        self.site_concentrations_nm: Dict[str, float] = {}
+        self.new_selection_concentration = tk.StringVar(value="")
         self.transfer_volume_nl = 50
         self.replacement_error = tk.StringVar()
         self.plate_name = plate_name
@@ -152,18 +158,21 @@ class SetView:
         toolbar = ttk.Frame(scroll.inner)
         toolbar.pack(fill="x", padx=10, pady=(8, 2))
         ttk.Label(toolbar, text="{} replacement sheet".format(title)).pack(side="left")
+        ttk.Label(toolbar, text="  Stock: {:g} µM".format(self.concentration_nm / 1000)).pack(side="left")
         ttk.Entry(toolbar, textvariable=self.path_var).pack(side="left", fill="x", expand=True, padx=8)
         ttk.Button(toolbar, text="Browse…", command=self._browse).pack(side="left")
         ttk.Button(toolbar, text="Clear set", command=self.clear).pack(side="left", padx=(8, 0))
-        excess_bar = ttk.Frame(scroll.inner)
-        excess_bar.pack(fill="x", padx=12, pady=4)
-        ttk.Label(excess_bar, text="Excess Multiplier").pack(side="left")
-        ttk.Entry(excess_bar, textvariable=self.excess_multiplier, width=8).pack(side="left", padx=8)
-        ttk.Label(excess_bar, text="Replacement % for new selections").pack(side="left", padx=(12, 0))
+        concentration_bar = ttk.Frame(scroll.inner)
+        concentration_bar.pack(fill="x", padx=12, pady=4)
+        ttk.Label(concentration_bar, text="Plate default (nM)").pack(side="left")
+        ttk.Entry(concentration_bar, textvariable=self.desired_concentration_nm, width=8).pack(side="left", padx=8)
+        ttk.Label(concentration_bar, text="New selections (nM; blank = default)").pack(side="left")
+        ttk.Entry(concentration_bar, textvariable=self.new_selection_concentration, width=8).pack(side="left", padx=8)
+        ttk.Label(concentration_bar, text="Replacement % for new selections").pack(side="left", padx=(12, 0))
         self.percentage_picker = ttk.Combobox(
-            excess_bar, textvariable=self.replacement_percentage, width=12, state="readonly")
+            concentration_bar, textvariable=self.replacement_percentage, width=12, state="readonly")
         self.percentage_picker.pack(side="left", padx=8)
-        ttk.Label(scroll.inner, text="Selected sites keep their percentage. Deselect and reselect to change it.").pack(anchor="w", padx=12)
+        ttk.Label(scroll.inner, text="Selected sites keep their percentage and concentration override. Deselect and reselect to change or reset them.").pack(anchor="w", padx=12)
         ttk.Label(scroll.inner, textvariable=self.replacement_error, foreground="#a40000").pack(anchor="w", padx=12)
         panel_bar = ttk.Frame(scroll.inner)
         panel_bar.pack(fill="x", padx=12, pady=(5, 2))
@@ -190,7 +199,7 @@ class SetView:
         ttk.Label(panel_bar, textvariable=self.orientation_summary, foreground="#3d626f").pack(
             side="left", padx=(12, 0)
         )
-        if self.title in {"Aptamers", "MB", "PAINT P1", "PAINT R1"}:
+        if self.title in {"Aptamers", "MB", "PAINT P1", "PAINT R1", "LowConc PAINT R1"}:
             legend = tk.Frame(scroll.inner, background="#f0f0f0")
             legend.pack(fill="x", padx=12, pady=(4, 2))
             self._legend_square(legend, self.SELECTABLE_BG, "").pack(side="left")
@@ -211,13 +220,18 @@ class SetView:
         self.panel_host.pack(fill="both", expand=True, padx=10, pady=6)
         self.refresh()
         self.circle_radius_var.trace_add("write", self._circle_radius_changed)
-        self.excess_multiplier.trace_add("write", lambda *_args: self.update_percentage_options(self.transfer_volume_nl))
+        self.desired_concentration_nm.trace_add("write", self._concentration_changed)
+        self.new_selection_concentration.trace_add("write", lambda *_args: self.update_percentage_options(self.transfer_volume_nl))
         self.update_percentage_options(self.transfer_volume_nl)
 
     def update_percentage_options(self, volume) -> None:
         self.transfer_volume_nl = volume
         try:
-            fractions = replacement_fractions(float(volume), float(self.excess_multiplier.get()))
+            fractions = replacement_fractions(
+                float(volume), float(self.new_selection_concentration.get().strip() or self.desired_concentration_nm.get()),
+                self.base_desired_concentration_nm,
+                self.base_concentration_nm / self.concentration_nm,
+            )
             self.replacement_error.set("")
         except ValueError as exc:
             fractions = [1.0]
@@ -225,10 +239,33 @@ class SetView:
         self._fraction_options = {"{:.10g}%".format(f * 100): f for f in fractions}
         self.percentage_picker.configure(values=list(self._fraction_options))
         if self.replacement_percentage.get() not in self._fraction_options:
-            self.replacement_percentage.set("100%")
-        if any(not any(math.isclose(f, option, rel_tol=0, abs_tol=1e-9) for option in fractions)
-               for f in self.site_fractions.values()):
-            self.replacement_error.set("Some selected percentages do not fit this volume. Restore the volume or reselect those sites.")
+            self.replacement_percentage.set(next(reversed(self._fraction_options)))
+        for name, fraction in self.site_fractions.items():
+            try:
+                options = replacement_fractions(float(volume), self.site_target(name),
+                    self.base_desired_concentration_nm, self.base_concentration_nm / self.concentration_nm)
+                if not any(math.isclose(fraction, option, rel_tol=0, abs_tol=1e-9) for option in options):
+                    raise ValueError
+            except ValueError:
+                self.replacement_error.set("Some selected targets/percentages do not fit this volume. Adjust settings or reselect those sites.")
+                break
+
+    def site_target(self, name: str) -> float:
+        if name in self.site_concentrations_nm:
+            return self.site_concentrations_nm[name]
+        return float(self.desired_concentration_nm.get())
+
+    def _target_label(self, name: str) -> str:
+        try:
+            target = self.site_target(name)
+            return "{:g} nM".format(target) if math.isfinite(target) and target > 0 else "Invalid nM"
+        except ValueError:
+            return "Invalid nM"
+
+    def _concentration_changed(self, *_args):
+        self.update_percentage_options(self.transfer_volume_nl)
+        for name in self.buttons.keys() | self.circle_sites.keys():
+            self._paint_square(name)
 
     def _selected_highlight(self, name: str, background: str, highlight: str) -> str:
         alpha = self.site_fractions.get(name, 1.0)
@@ -261,6 +298,7 @@ class SetView:
         self._clear_panel_cache()
         self.variables.clear()
         self.site_fractions.clear()
+        self.site_concentrations_nm.clear()
         self.buttons.clear()
         self.circle_sites.clear()
         self.color_frames.clear()
@@ -394,7 +432,7 @@ class SetView:
                     text="" if is_selectable else "×",
                     variable=variable,
                     indicatoron=False,
-                    width=2,
+                    width=9,
                     height=1,
                     relief="raised" if is_selectable else "flat",
                     borderwidth=1,
@@ -469,11 +507,14 @@ class SetView:
             ring = canvas.create_oval(x-r, y-r, x+r, y+r, outline=color, width=1.5)
             dot = canvas.create_oval(x-4, y-4, x+4, y+4, fill=color, outline="")
             if configured:
+                canvas.create_text(x, y, text="", fill="white", font=("TkDefaultFont", 9, "bold"),
+                                   tags=("concentration_labels", "target_{}".format(ring)))
                 self.circle_sites[name] = (canvas, ring, dot, color)
                 self._paint_square(name)
             if not selectable:
                 canvas.create_text(x, y, text="×", fill="#969ba0")
             targets.append((name, x_nm, y_nm, selectable))
+        canvas.tag_raise("concentration_labels")
         def toggle(event):
             name = nearest_panel_site(targets, (event.x-left)/scale, (event.y-top)/scale, radius_nm=radius)
             if name is not None:
@@ -505,7 +546,9 @@ class SetView:
             color = self.CONFLICT_BG if selected and name in self.conflicts else (highlight if selected else color)
             canvas.itemconfigure(ring, outline=color, fill=highlight if selected else "",
                                  width=3 if selected else 1.5)
-            canvas.itemconfigure(dot, fill=color)
+            canvas.itemconfigure(dot, fill=color, state="hidden" if selected else "normal")
+            canvas.itemconfigure("target_{}".format(ring), text=self._target_label(name) if selected else "",
+                                 fill="black" if selected and self.site_fractions.get(name, 1.0) >= 0.5 else "white")
             return
         button = self.buttons.get(name)
         variable = self.variables.get(name)
@@ -515,7 +558,7 @@ class SetView:
         conflict = selected and name in self.conflicts
         highlight = self._selected_highlight(name, self.SELECTABLE_BG, self.SELECTED_BG)
         button.configure(
-            text="×" if conflict else ("✓" if selected else ""),
+            text=(("× " if conflict else "") + self._target_label(name)) if selected else "",
             background=self.CONFLICT_BG if conflict else (highlight if selected else self.SELECTABLE_BG),
             activebackground=self.CONFLICT_BG if conflict else (highlight if selected else self.SELECTABLE_HOVER_BG),
             selectcolor=self.CONFLICT_BG if conflict else highlight,
@@ -525,9 +568,23 @@ class SetView:
 
     def _on_square_toggled(self, name: str) -> None:
         if self.variables[name].get():
+            override = self.new_selection_concentration.get().strip()
+            try:
+                target = float(override or self.desired_concentration_nm.get())
+                desired_concentration_ratio(target, self.base_desired_concentration_nm)
+            except ValueError:
+                self.variables[name].set(False)
+                self.replacement_error.set("Enter a finite positive concentration before selecting sites.")
+                self._paint_square(name)
+                return
+            if override:
+                self.site_concentrations_nm[name] = target
+            else:
+                self.site_concentrations_nm.pop(name, None)
             self.site_fractions[name] = self._fraction_options[self.replacement_percentage.get()]
         else:
             self.site_fractions.pop(name, None)
+            self.site_concentrations_nm.pop(name, None)
         self.mark_conflicts(set())
         self._paint_square(name)
         self._update_selection_summary()
@@ -557,6 +614,7 @@ class SetView:
     def clear(self) -> None:
         self.conflicts.clear()
         self.site_fractions.clear()
+        self.site_concentrations_nm.clear()
         for name, variable in self.variables.items():
             variable.set(False)
             self._paint_square(name)
@@ -741,6 +799,15 @@ def panel_definitions() -> List[Tuple[str, str, str, List[Dict[str, object]]]]:
                 )
             ],
         ),
+        (
+            "LowConc PAINT R1",
+            "PAINT_R1_replace.csv",
+            "SourcePlate7[7]",
+            [dense_panel(
+                "U-Apt R1", colors=paint_r1_colors,
+                name_template="U-Apt_{row}-{column}_R1", mirror_columns=True,
+            )],
+        ),
     ]
 
 
@@ -915,6 +982,7 @@ class OrigamiTemplateView(ttk.Frame):
         self.selected_group_id: Optional[str] = None
         self.selected_group_ids: List[str] = []
         self.group_name_var = tk.StringVar()
+        self.group_brightness_var = tk.StringVar(value="1")
         self.group_role_var = tk.StringVar(value="Digital bit")
         self.group_active_var = tk.BooleanVar(value=True)
         self._built_shape = (8, 12)
@@ -1173,10 +1241,15 @@ class OrigamiTemplateView(ttk.Frame):
         ttk.Checkbutton(editor, text="Bit is ON in this template", variable=self.group_active_var).grid(
             row=2, column=0, columnspan=2, sticky="w"
         )
+        ttk.Label(editor, text="Brightness factor").grid(row=3, column=0, sticky="w")
+        ttk.Entry(editor, textvariable=self.group_brightness_var, width=10).grid(
+            row=3, column=1, sticky="ew", padx=(8, 12))
+        ttk.Label(editor, text="Digital bits: 1 = normal, 2 = twice the signal, 0.2 = one-fifth.",
+                  wraplength=300).grid(row=4, column=0, columnspan=2, sticky="w")
         for row, buttons in enumerate((
             (("Create group", self._create_group), ("Update group", self._update_group)),
             (("Delete selected", self._delete_group), ("Toggle bit ON/OFF", self._toggle_group_active)),
-        ), start=3):
+        ), start=5):
             for column, (label, command) in enumerate(buttons):
                 ttk.Button(editor, text=label, command=command).grid(
                     row=row, column=column, sticky="ew", padx=2, pady=3,
@@ -1185,7 +1258,7 @@ class OrigamiTemplateView(ttk.Frame):
 
         self.group_tree = ttk.Treeview(
             self.logical_frame,
-            columns=("color", "name", "role", "sites", "state"),
+            columns=("color", "name", "role", "sites", "state", "brightness"),
             show="headings",
             height=5,
             selectmode="extended",
@@ -1197,6 +1270,7 @@ class OrigamiTemplateView(ttk.Frame):
             ("role", "Role", 85),
             ("sites", "Sites", 40),
             ("state", "State", 65),
+            ("brightness", "Brightness", 75),
         ):
             self.group_tree.heading(key, text=label)
             self.group_tree.column(key, width=width, anchor="w" if key == "name" else "center")
@@ -1224,6 +1298,7 @@ class OrigamiTemplateView(ttk.Frame):
                     "Digital bit" if is_bit else "Alignment-only",
                     len(group.get("physical_sites", [])),
                     ("ON" if group_id in active else "OFF") if is_bit else "Always on",
+                    f"{group.get('brightness_factor', 1.0):g}×" if is_bit else "—",
                 ),
             )
             self.group_tree.tag_configure(group_id, foreground=color)
@@ -1273,11 +1348,13 @@ class OrigamiTemplateView(ttk.Frame):
             group = groups[0]
             group_id = self.selected_group_id
             self.group_name_var.set(str(group.get("label", group_id)))
+            self.group_brightness_var.set(str(group.get("brightness_factor", 1.0)))
             is_bit = group_id in self.logical_stroke_variables
             self.group_role_var.set("Digital bit" if is_bit else "Alignment-only")
             self.group_active_var.set(self.logical_stroke_variables[group_id].get() if is_bit else True)
         else:
             self.group_name_var.set("")
+            self.group_brightness_var.set("1")
         sites = {(int(row) - 1, int(column) - 1)
                  for group in groups for row, column in group.get("physical_sites", [])}
         for site, variable in self.site_variables.items():
@@ -1321,6 +1398,16 @@ class OrigamiTemplateView(ttk.Frame):
         if not create and self.selected_group_id is None:
             messagebox.showerror("No group selected", "Select the group you want to update.", parent=self)
             return
+        is_bit = self.group_role_var.get() == "Digital bit"
+        brightness_factor = 1.0
+        if is_bit:
+            try:
+                brightness_factor = float(self.group_brightness_var.get())
+                if not math.isfinite(brightness_factor) or brightness_factor <= 0:
+                    raise ValueError
+            except ValueError:
+                messagebox.showerror("Invalid brightness factor", "Enter a positive finite number, such as 2 or 0.2.", parent=self)
+                return
         if self.logical_schema is None:
             self.logical_schema = empty_logical_bit_schema(*self._built_shape)
         old_id = None if create else self.selected_group_id
@@ -1346,6 +1433,7 @@ class OrigamiTemplateView(ttk.Frame):
         }
         is_bit = self.group_role_var.get() == "Digital bit"
         if is_bit:
+            group["brightness_factor"] = brightness_factor
             group["evidence_sites"] = list(group["physical_sites"])
             self.logical_schema.setdefault("logical_bits", []).append(group)
         else:
@@ -1829,9 +1917,21 @@ class PicklistApp(tk.Tk):
             view.path_var.trace_add("write", lambda *_args: self._selections_changed())
         self._build_settings(settings_page, main_tabs, preview_page)
         def update_percentage_options(*_args):
+            try:
+                base_concentration = parse_vector(self.staple.get(), 4, "Base staple")[0]
+            except ValueError:
+                base_concentration = float("nan")
+            try:
+                base_target = parse_vector(self.desired.get(), 6, "Desired")[1]
+            except ValueError:
+                base_target = float("nan")
             for view in self.set_views:
+                view.base_concentration_nm = base_concentration
+                view.base_desired_concentration_nm = base_target
                 view.update_percentage_options(self.transfer_volume.get())
         self.transfer_volume.trace_add("write", update_percentage_options)
+        self.staple.trace_add("write", update_percentage_options)
+        self.desired.trace_add("write", update_percentage_options)
         update_percentage_options()
         plate_actions = ttk.Frame(plate_page, padding=(12, 10, 12, 0))
         plate_actions.pack(fill="x")
@@ -1934,6 +2034,7 @@ class PicklistApp(tk.Tk):
                             "selected": selected,
                             "selected_names": names,
                             "site_fractions": {name: view.site_fractions.get(name, 1.0) for name in names},
+                            "site_concentrations_nm": {name: view.site_target(name) for name in names},
                             "spacing_x_nm": panel.get("spacing_x_nm"),
                             "spacing_y_nm": panel.get("spacing_y_nm"),
                             "mirror_columns": bool(panel.get("mirror_columns", False)),
@@ -2108,7 +2209,7 @@ class PicklistApp(tk.Tk):
             self.source_plate_type, self.transfers_per_source, self.transfer_volume,
             self.max_volume, self.hinge_type, self.staple, self.scaffold,
             self.magnesium, self.sodium, self.te_10x, self.desired,
-            *(view.excess_multiplier for view in self.set_views),
+            *(view.desired_concentration_nm for view in self.set_views),
         )
         for variable in variables:
             variable.trace_add("write", self._invalidate_preview)
@@ -2254,23 +2355,25 @@ class PicklistApp(tk.Tk):
         self.picklist_path = self._field(pick, 8, "Latest picklist path", str(self._restore_path("save_picklist_path", OUTPUT_DIR / "picklist_combined.csv")))
         self.starting_well = self._field(pick, 9, "Destination starting well", "")
         ttk.Button(pick, text="Start here", command=self._apply_starting_well).grid(row=9, column=2, sticky="w", padx=6, pady=4)
-        excess = ttk.LabelFrame(pick, text="Excess Multiplier (per replacement tab)", padding=4)
-        excess.grid(row=10, column=0, columnspan=3, sticky="ew", pady=4)
-        for index, view in enumerate(self.set_views):
-            field = ttk.Frame(excess)
-            field.grid(row=index // 3, column=index % 3, sticky="w", padx=8, pady=2)
-            ttk.Label(field, text=view.title).pack(side="left")
-            ttk.Entry(field, textvariable=view.excess_multiplier, width=6).pack(side="left", padx=6)
         mix = ttk.LabelFrame(page, text="Mixing recipe", padding=10)
         mix.grid(row=1, column=0, sticky="new", padx=14, pady=6)
         mix.columnconfigure(1, weight=1)
         self.mix_path = self._field(mix, 0, "Latest recipe path", str(self._restore_path("save_recipe_path", OUTPUT_DIR / "mixing_recipe.csv")))
-        self.staple = self._field(mix, 1, "Staple [nM, xTE, Mg, Na]", "200000,1,0,0")
+        self.staple = self._field(mix, 1, "Base staple [nM, xTE, Mg, Na]", "200000,1,0,0")
         self.scaffold = self._field(mix, 2, "Scaffold [nM, xTE, Mg, Na]", "400,0.1,0,0")
         self.te_10x = self._field(mix, 3, "10X TE [nM, xTE, Mg, Na]", "0,10,0,0")
         self.magnesium = self._field(mix, 4, "Mg [nM, xTE, mM, Na]", "0,0,100,0")
         self.sodium = self._field(mix, 5, "Na [nM, xTE, Mg, mM]", "0,0,0,100")
-        self.desired = self._field(mix, 6, "Desired [µL, staple nM, scaffold nM, xTE, Mg mM, Na mM]", "100,50,10,1,12,5")
+        self.desired = self._field(mix, 6, "Desired [µL, base staple nM, scaffold nM, xTE, Mg mM, Na mM]", "100,50,10,1,12,5")
+        targets = ttk.LabelFrame(mix, text="Desired replacement staple concentrations (nM)", padding=8)
+        targets.grid(row=7, column=0, columnspan=3, sticky="ew", pady=6)
+        ttk.Label(targets, text="Enter a positive final concentration per staple for each plate.\n"
+                  "Replacement % splits the target between replacement and original staples.").grid(
+                      row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        for index, view in enumerate(self.set_views, 1):
+            ttk.Label(targets, text="{} (stock: {:g} µM)".format(view.title, view.concentration_nm / 1000)).grid(row=index, column=0, sticky="w", padx=(0, 12))
+            ttk.Entry(targets, textvariable=view.desired_concentration_nm, width=12).grid(
+                row=index, column=1, sticky="w", pady=2)
 
         action = ttk.Frame(page, padding=14)
         action.grid(row=2, column=0, sticky="ew")
@@ -2728,16 +2831,23 @@ class PicklistApp(tk.Tk):
                 return
             selections = []
             design_names = []
+            desired = parse_vector(self.desired.get(), 6, "Desired")
             for view in self.set_views:
                 names = view.selected()
                 if names:
                     try:
-                        multiplier = float(view.excess_multiplier.get())
+                        target = view.desired_concentration_nm.get().strip()
+                        desired_concentration = float(target)
+                        desired_concentration_ratio(desired_concentration, desired[1])
                     except ValueError:
-                        raise ValueError("{} Excess Multiplier must be a positive number.".format(view.title))
+                        raise ValueError("{}: desired base and replacement concentrations must be finite positive numbers.".format(view.title))
                     selections.append(ReplacementSelection(
-                        Path(view.path_var.get()), names, view.plate_name, multiplier,
+                        Path(view.path_var.get()), names, view.plate_name,
                         site_fractions={name: view.site_fractions.get(name, 1.0) for name in names},
+                        concentration_nm=view.concentration_nm,
+                        desired_concentration_nm=desired_concentration,
+                        site_concentrations_nm={name: view.site_concentrations_nm[name]
+                                                for name in names if name in view.site_concentrations_nm},
                     ))
                     design_names.extend(names)
             if not selections:
@@ -2745,24 +2855,29 @@ class PicklistApp(tk.Tk):
             transfer_volume = int(self.transfer_volume.get())
             transfers_per_source = int(self.transfers_per_source.get())
             destination_wells = valid_well_list(self.destination_wells.get())
+            staple = parse_vector(self.staple.get(), 4, "Base staple")
             self.destination_wells.set(",".join(destination_wells))
             picklist = generate_picklist(
                 Path(self.base_path.get()), selections, destination_wells,
                 self.source_plate_type.get().strip(), self.destination_plate.get().strip(),
                 transfer_volume, float(self.max_volume.get()), transfers_per_source,
                 hinge_type=self._selected_hinge_type(),
+                base_concentration_nm=staple[0],
+                base_desired_concentration_nm=desired[1],
             )
             unique_sources = {(str(row["Source Plate Name"]), str(row["Source Well"])) for row in picklist}
             total_volume_nl = sum(float(row["Transfer Volume"]) for row in picklist)
             available_ul = total_volume_nl / 1000.0
-            # Count each replacement in proportion to its excess so the nominal
-            # staple concentration is maintained when diluting the pooled mix.
+            # Transfers already compensate for each stock concentration. The
+            # physical pool volume per base transfer sets the aliquot needed for
+            # the base target concentration, including plate targets and dilute stocks.
+            # All staple stocks share the buffer composition in the staple vector.
             effective_staples = total_volume_nl / (transfer_volume * transfers_per_source)
             mixing = calculate_mixing_volumes(
-                parse_vector(self.staple.get(), 4, "Staple"), effective_staples,
+                staple, effective_staples,
                 parse_vector(self.scaffold.get(), 4, "Scaffold"),
                 parse_vector(self.magnesium.get(), 4, "Mg"), parse_vector(self.sodium.get(), 4, "Na"),
-                parse_vector(self.te_10x.get(), 4, "10X TE"), parse_vector(self.desired.get(), 6, "Desired"),
+                parse_vector(self.te_10x.get(), 4, "10X TE"), desired,
             )
             requested_ul = mixing[0]["Volume_uL"]
             if requested_ul > available_ul + 1e-9:
