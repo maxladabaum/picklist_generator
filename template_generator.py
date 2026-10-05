@@ -40,6 +40,7 @@ def empty_logical_bit_schema(rows: int, columns: int) -> Dict[str, object]:
         "physical_rows": int(rows),
         "physical_columns": int(columns),
         "alignment_groups": [],
+        "dark_groups": [],
         "logical_bits": [],
     }
 
@@ -208,6 +209,11 @@ def normalize_logical_bit_schema(
             group["display_color"] = str(display_color).lower()
             next_color_index += 1
             group["physical_sites"] = normalized_sites("physical_sites")
+            if key == "dark_groups":
+                radius = raw_group.get("mask_radius_nm", 5.0)
+                if isinstance(radius, bool) or not isinstance(radius, (int, float)) or not math.isfinite(radius) or radius <= 0:
+                    raise ValueError(f"{group_id}.mask_radius_nm must be a positive finite number.")
+                group["mask_radius_nm"] = float(radius)
             if evidence:
                 factor = raw_group.get("brightness_factor", 1.0)
                 if isinstance(factor, bool) or not isinstance(factor, (int, float)) or not math.isfinite(factor) or factor <= 0:
@@ -223,8 +229,12 @@ def normalize_logical_bit_schema(
     alignment_key = "alignment_groups" if "alignment_groups" in schema else "alignment_strokes"
     alignment_groups = normalized_groups(alignment_key, evidence=False)
     logical_bits = normalized_groups("logical_bits", evidence=True)
-    if not logical_bits:
-        raise ValueError("A logical-bit schema must define at least one logical bit.")
+    dark_groups = normalized_groups("dark_groups", evidence=False)
+    if not (logical_bits or alignment_groups or dark_groups):
+        raise ValueError("A schema must define at least one group.")
+    bright_sites = {tuple(site) for group in alignment_groups + logical_bits for site in group["physical_sites"]}
+    if any(tuple(site) in bright_sites for group in dark_groups for site in group["physical_sites"]):
+        raise ValueError("Dark groups cannot share physical sites with bright groups.")
     normalized = dict(schema)
     normalized["format"] = "paint-analysis-logical-bits-v1"
     normalized["overlap_semantics"] = "physical-site-union"
@@ -233,6 +243,7 @@ def normalize_logical_bit_schema(
     normalized["alignment_groups"] = alignment_groups
     normalized.pop("alignment_strokes", None)
     normalized["logical_bits"] = logical_bits
+    normalized["dark_groups"] = dark_groups
     normalized.pop("active_logical_bits", None)
     return json.loads(json.dumps(normalized))
 
@@ -382,6 +393,10 @@ def render_barcode_template(
             if active_logical_bits is not None
             else infer_active_logical_bits(rows, columns, selected, schema=logical_model)
         )
+        dark_sites = {(int(row) - 1, int(column) - 1)
+                      for group in logical_model.get("dark_groups", [])
+                      for row, column in group["physical_sites"]}
+        selected = [site for site in selected if site not in dark_sites]
         known_ids = {str(bit["id"]) for bit in logical_model["logical_bits"]}  # type: ignore[index]
         unknown_ids = sorted(set(active_ids) - known_ids)
         if unknown_ids:

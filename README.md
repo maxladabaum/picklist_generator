@@ -325,3 +325,15 @@ support by both the number of group positions and this factor before its usual
 support, prominence, and probability checks. After loading a changed schema,
 rerun analysis Steps 3 and 4. This calibration affects digital-bit detection;
 it does not change rendered template spots or physical mixing volumes.
+
+Dark alignment groups can be created in the template editor by choosing
+**Role → Dark (alignment)**. Select lattice sites, enter a **Dark mask radius
+(nm)**, and create or update the group. Dashed blue circles preview the expected
+empty regions. Brightness factor and bit ON/OFF state apply to digital bits;
+dark groups are always active alignment constraints and do not add bright spots.
+Dark and bright groups cannot occupy the same lattice sites.
+
+PNG metadata, sidecar JSON, and reusable group JSON preserve `dark_groups`, with
+an `id`, one-based `physical_sites`, and positive `mask_radius_nm` for each group.
+Alignment-only templates with bright and dark groups can be exported without
+any digital bits. Reload the template in PAINT Analysis and rerun Steps 1–4.

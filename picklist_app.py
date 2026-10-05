@@ -983,6 +983,7 @@ class OrigamiTemplateView(ttk.Frame):
         self.selected_group_ids: List[str] = []
         self.group_name_var = tk.StringVar()
         self.group_brightness_var = tk.StringVar(value="1")
+        self.group_dark_radius_var = tk.StringVar(value="5")
         self.group_role_var = tk.StringVar(value="Digital bit")
         self.group_active_var = tk.BooleanVar(value=True)
         self._built_shape = (8, 12)
@@ -1236,7 +1237,7 @@ class OrigamiTemplateView(ttk.Frame):
         ttk.Label(editor, text="Role").grid(row=1, column=0, sticky="w", pady=4)
         ttk.Combobox(
             editor, textvariable=self.group_role_var,
-            values=("Digital bit", "Alignment-only"), state="readonly", width=16,
+            values=("Digital bit", "Alignment-only", "Dark (alignment)"), state="readonly", width=16,
         ).grid(row=1, column=1, sticky="ew", padx=(8, 12), pady=4)
         ttk.Checkbutton(editor, text="Bit is ON in this template", variable=self.group_active_var).grid(
             row=2, column=0, columnspan=2, sticky="w"
@@ -1246,10 +1247,13 @@ class OrigamiTemplateView(ttk.Frame):
             row=3, column=1, sticky="ew", padx=(8, 12))
         ttk.Label(editor, text="Digital bits: 1 = normal, 2 = twice the signal, 0.2 = one-fifth.",
                   wraplength=300).grid(row=4, column=0, columnspan=2, sticky="w")
+        ttk.Label(editor, text="Dark mask radius (nm)").grid(row=5, column=0, sticky="w")
+        ttk.Entry(editor, textvariable=self.group_dark_radius_var, width=10).grid(row=5, column=1, sticky="ew")
+        ttk.Label(editor, text="Dark groups mark empty regions for alignment, not ON/OFF bits.", wraplength=300).grid(row=6, column=0, columnspan=2, sticky="w")
         for row, buttons in enumerate((
             (("Create group", self._create_group), ("Update group", self._update_group)),
             (("Delete selected", self._delete_group), ("Toggle bit ON/OFF", self._toggle_group_active)),
-        ), start=5):
+        ), start=7):
             for column, (label, command) in enumerate(buttons):
                 ttk.Button(editor, text=label, command=command).grid(
                     row=row, column=column, sticky="ew", padx=2, pady=3,
@@ -1282,10 +1286,11 @@ class OrigamiTemplateView(ttk.Frame):
         if sys.platform == "darwin":
             self.group_tree.bind("<Command-Button-1>", self._command_select_group)
         bit_ids = {str(bit["id"]) for bit in schema.get("logical_bits", [])}
-        groups = list(schema.get("alignment_groups", [])) + list(schema.get("logical_bits", []))
+        groups = list(schema.get("alignment_groups", [])) + list(schema.get("logical_bits", [])) + list(schema.get("dark_groups", []))
         for group in groups:
             group_id = str(group["id"])
             is_bit = group_id in bit_ids
+            is_dark = group in schema.get("dark_groups", [])
             color = str(group.get("display_color", "#ffffff"))
             self.group_tree.insert(
                 "",
@@ -1295,10 +1300,10 @@ class OrigamiTemplateView(ttk.Frame):
                 values=(
                     "● " + color,
                     str(group.get("label", group_id)),
-                    "Digital bit" if is_bit else "Alignment-only",
+                    "Digital bit" if is_bit else ("Dark" if is_dark else "Alignment-only"),
                     len(group.get("physical_sites", [])),
-                    ("ON" if group_id in active else "OFF") if is_bit else "Always on",
-                    f"{group.get('brightness_factor', 1.0):g}×" if is_bit else "—",
+                    ("ON" if group_id in active else "OFF") if is_bit else ("Dark" if is_dark else "Always on"),
+                    f"{group.get('brightness_factor', 1.0):g}×" if is_bit else (f"r={group['mask_radius_nm']:g} nm" if is_dark else "—"),
                 ),
             )
             self.group_tree.tag_configure(group_id, foreground=color)
@@ -1325,7 +1330,7 @@ class OrigamiTemplateView(ttk.Frame):
             return []
         return list(self.logical_schema.get("alignment_groups", [])) + list(
             self.logical_schema.get("logical_bits", [])
-        )
+        ) + list(self.logical_schema.get("dark_groups", []))
 
     def _group_by_id(self, group_id: Optional[str]) -> Optional[Dict[str, object]]:
         if group_id is None:
@@ -1350,7 +1355,8 @@ class OrigamiTemplateView(ttk.Frame):
             self.group_name_var.set(str(group.get("label", group_id)))
             self.group_brightness_var.set(str(group.get("brightness_factor", 1.0)))
             is_bit = group_id in self.logical_stroke_variables
-            self.group_role_var.set("Digital bit" if is_bit else "Alignment-only")
+            self.group_role_var.set("Digital bit" if is_bit else ("Dark (alignment)" if group in self.logical_schema.get("dark_groups", []) else "Alignment-only"))
+            self.group_dark_radius_var.set(str(group.get("mask_radius_nm", 5.0)))
             self.group_active_var.set(self.logical_stroke_variables[group_id].get() if is_bit else True)
         else:
             self.group_name_var.set("")
@@ -1399,6 +1405,16 @@ class OrigamiTemplateView(ttk.Frame):
             messagebox.showerror("No group selected", "Select the group you want to update.", parent=self)
             return
         is_bit = self.group_role_var.get() == "Digital bit"
+        is_dark = self.group_role_var.get() == "Dark (alignment)"
+        dark_radius = 5.0
+        if is_dark:
+            try:
+                dark_radius = float(self.group_dark_radius_var.get())
+                if not math.isfinite(dark_radius) or dark_radius <= 0:
+                    raise ValueError
+            except ValueError:
+                messagebox.showerror("Invalid dark radius", "Enter a positive finite radius in nm.", parent=self)
+                return
         brightness_factor = 1.0
         if is_bit:
             try:
@@ -1414,7 +1430,7 @@ class OrigamiTemplateView(ttk.Frame):
         old_group = self._group_by_id(old_id)
         old_active = set(self._active_bit_ids())
         if old_id is not None:
-            for key in ("alignment_groups", "logical_bits"):
+            for key in ("alignment_groups", "logical_bits", "dark_groups"):
                 self.logical_schema[key] = [
                     group
                     for group in self.logical_schema.get(key, [])
@@ -1436,6 +1452,9 @@ class OrigamiTemplateView(ttk.Frame):
             group["brightness_factor"] = brightness_factor
             group["evidence_sites"] = list(group["physical_sites"])
             self.logical_schema.setdefault("logical_bits", []).append(group)
+        elif is_dark:
+            group["mask_radius_nm"] = dark_radius
+            self.logical_schema.setdefault("dark_groups", []).append(group)
         else:
             self.logical_schema.setdefault("alignment_groups", []).append(group)
         old_active.discard(str(old_id))
@@ -1452,7 +1471,7 @@ class OrigamiTemplateView(ttk.Frame):
             return
         deleted = set(self.selected_group_ids)
         active = set(self._active_bit_ids())
-        for key in ("alignment_groups", "logical_bits"):
+        for key in ("alignment_groups", "logical_bits", "dark_groups"):
             self.logical_schema[key] = [
                 group
                 for group in self.logical_schema.get(key, [])
@@ -1522,10 +1541,10 @@ class OrigamiTemplateView(ttk.Frame):
         self._rebuild_grid(select_all=False, selected_sites=loaded_sites)
 
     def _save_logical_schema(self) -> None:
-        if self.logical_schema is None or not self.logical_schema.get("logical_bits"):
+        if self.logical_schema is None or not self._all_groups():
             messagebox.showinfo(
                 "No bit schema",
-                "Create at least one digital-bit group first.",
+                "Create at least one group first.",
                 parent=self,
             )
             return
@@ -1604,7 +1623,7 @@ class OrigamiTemplateView(ttk.Frame):
         return [site for site, variable in self.site_variables.items() if variable.get()]
 
     def _rendered_sites(self) -> List[Tuple[int, int]]:
-        if self.logical_schema is None or not self.logical_schema.get("logical_bits"):
+        if self.logical_schema is None or not self._all_groups():
             return []
         return logical_template_sites(
             *self._built_shape,
@@ -1701,6 +1720,13 @@ class OrigamiTemplateView(ttk.Frame):
                 color = str(group.get("display_color", "#ffffff"))
                 for group_row, group_column in group.get("physical_sites", []):
                     group_colors[(int(group_row) - 1, int(group_column) - 1)].append(color)
+        for group in (self.logical_schema or {}).get("dark_groups", []):
+            dark_radius = float(group.get("mask_radius_nm", 5.0)) * scale
+            for group_row, group_column in group["physical_sites"]:
+                x = left + (width_nm - margin - positions[int(group_column) - 1]) * scale
+                y = top + (margin + (int(group_row) - 1) * spacing_y) * scale
+                self.preview.create_oval(x-dark_radius, y-dark_radius, x+dark_radius, y+dark_radius,
+                                         fill="", outline="#38bdf8", dash=(3, 2), tags=("dark-mask",))
         for row in range(rows):
             for column in range(columns):
                 x = left + (width_nm - margin - positions[column]) * scale
@@ -1757,8 +1783,8 @@ class OrigamiTemplateView(ttk.Frame):
             settings = self._settings()
             if settings[:2] != self._built_shape:
                 raise ValueError("Click Apply grid size after changing the row or column count.")
-            if self.logical_schema is None or not self.logical_schema.get("logical_bits"):
-                raise ValueError("Create at least one digital-bit group before saving a template.")
+            if self.logical_schema is None or not self._all_groups():
+                raise ValueError("Create at least one group before saving a template.")
             selected = self._rendered_sites()
             if not selected:
                 raise ValueError("Turn on a digital bit or create an alignment-only group before saving.")
