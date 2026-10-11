@@ -502,7 +502,7 @@ class PicklistCoreTests(unittest.TestCase):
             rows, _ = parse_source2(SHEETS / filename)
             self.assertTrue(rows, filename)
 
-    def test_paint_r1_row_15_uses_its_distinct_replacement_scheme(self):
+    def test_paint_r1_row_15_removes_corrected_target_and_preserves_old_target(self):
         base, _ = parse_source1(SHEETS / "book_base.csv")
         rows = generate_picklist(
             SHEETS / "book_base.csv",
@@ -524,6 +524,13 @@ class PicklistCoreTests(unittest.TestCase):
             )
         )
         self.assertFalse(
+            any(
+                row["Source Plate Name"] == "SourcePlate1[1]"
+                and row["Source Well"] == "H08"
+                for row in rows
+            )
+        )
+        self.assertTrue(
             any(
                 row["Source Plate Name"] == "SourcePlate1[1]"
                 and row["Source Well"] == "H09"

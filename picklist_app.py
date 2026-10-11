@@ -63,6 +63,8 @@ from template_generator import (
 )
 
 
+APP_VERSION = "1.0.1"
+APP_TITLE = "Echo Picklist Generator v{}".format(APP_VERSION)
 APP_DIR = Path(__file__).resolve().parent
 SHEET_DIR = APP_DIR / "replacement_sheets"
 OUTPUT_DIR = APP_DIR / "generated_output"
@@ -1849,7 +1851,7 @@ class PicklistApp(tk.Tk):
         if not STORAGE_STATE_PATH.exists():
             save_json(STORAGE_STATE_PATH, self.storage_state)
         self._config_save_job = None
-        self.title("Echo Picklist Generator")
+        self.title(APP_TITLE)
         self.geometry("1280x880")
         self.minsize(960, 700)
         self._set_style()
@@ -1879,7 +1881,7 @@ class PicklistApp(tk.Tk):
     def _build(self) -> None:
         header = ttk.Frame(self, padding=(14, 10))
         header.pack(fill="x")
-        ttk.Label(header, text="Echo Picklist Generator", style="Title.TLabel").pack(side="left")
+        ttk.Label(header, text=APP_TITLE, style="Title.TLabel").pack(side="left")
         ttk.Label(header, text="Select replacements, preview the run, then save it or send it to storage.").pack(side="left", padx=18)
         main_tabs = ttk.Notebook(self)
         main_tabs.pack(fill="both", expand=True, padx=12, pady=(0, 8))

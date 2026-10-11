@@ -1,5 +1,7 @@
 # Echo Picklist Generator
 
+Version **1.0.1** — corrected PAINT P1 and PAINT R1 row-15 replacement targets.
+
 A standalone desktop version of the GUI and picklist workflow from
 `picklist_generator_replacement-Copy1.ipynb`. Yaritza Extensions, Aptamers,
 MB, PAINT P1, PAINT R1, LowConc PAINT R1, and the base source sheet are loaded
