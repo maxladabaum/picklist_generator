@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import math
+from itertools import combinations
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +37,8 @@ class ReplacementSelection:
     site_fractions: Optional[Dict[str, float]] = None
     concentration_nm: float = 200000.0
     site_concentrations_nm: Optional[Dict[str, float]] = None
+    replacement_tab: str = ""
+    panel_names: Optional[Dict[str, str]] = None
 
 
 def desired_concentration_ratio(
@@ -49,17 +52,29 @@ def desired_concentration_ratio(
     return desired_concentration_nm / base_desired_concentration_nm
 
 
+def validate_transfer_limits(minimum_transfer_nl=25.0, transfer_increment_nl=25.0):
+    if any(not math.isfinite(v) or v <= 0 for v in (minimum_transfer_nl, transfer_increment_nl)):
+        raise ValueError("Minimum transfer and transfer increment must be finite positive volumes.")
+
+
+def valid_transfer(volume, minimum_transfer_nl=25.0, transfer_increment_nl=25.0):
+    """Zero omits a transfer; positive transfers meet both independent limits."""
+    return math.isfinite(volume) and (abs(volume) < 1e-9 or (
+        volume >= minimum_transfer_nl - 1e-9 and math.isclose(
+            volume / transfer_increment_nl, round(volume / transfer_increment_nl), rel_tol=0, abs_tol=1e-9)))
+
+
 def replacement_fractions(
     transfer_volume_nl: float, desired_concentration_nm: float = 50.0,
     base_desired_concentration_nm: float = 50.0, concentration_ratio: float = 1.0,
+    minimum_transfer_nl: float = 25.0, transfer_increment_nl: float = 25.0,
 ) -> List[float]:
-    """Return splits whose two transfers are whole 25 nL droplets."""
-    if not math.isfinite(transfer_volume_nl) or transfer_volume_nl <= 0 or not math.isclose(
-        transfer_volume_nl / 25, round(transfer_volume_nl / 25), abs_tol=1e-9
-    ):
-        raise ValueError("Transfer volume must be a positive multiple of 25 nL.")
+    """Return splits meeting the minimum and increment for both source stocks."""
+    validate_transfer_limits(minimum_transfer_nl, transfer_increment_nl)
+    if transfer_volume_nl <= 0 or not valid_transfer(transfer_volume_nl, minimum_transfer_nl, transfer_increment_nl):
+        raise ValueError("Transfer volume must be at least {:g} nL and a multiple of {:g} nL.".format(minimum_transfer_nl, transfer_increment_nl))
     droplets = transfer_volume_nl * desired_concentration_ratio(
-        desired_concentration_nm, base_desired_concentration_nm) / 25
+        desired_concentration_nm, base_desired_concentration_nm) / transfer_increment_nl
     if not math.isfinite(droplets) or droplets <= 0:
         raise ValueError("Target transfer volume must be finite and positive.")
     if not math.isfinite(concentration_ratio) or concentration_ratio <= 0:
@@ -73,11 +88,16 @@ def replacement_fractions(
         # be possible because its stock is more dilute.
         candidates = [1 - original / droplets for original in range(math.floor(droplets), -1, -1)]
     fractions = [fraction for fraction in candidates
-                 if math.isclose(droplets * fraction * concentration_ratio,
-                                 round(droplets * fraction * concentration_ratio),
-                                 rel_tol=0, abs_tol=1e-9)]
+                 if all(valid_transfer(v, minimum_transfer_nl, transfer_increment_nl) for v in (
+                     droplets * (1-fraction) * transfer_increment_nl,
+                     droplets * fraction * concentration_ratio * transfer_increment_nl))]
     if not fractions:
-        raise ValueError("Target and stock concentrations do not allow transfers in 25 nL increments.")
+        raise ValueError(
+            "No valid replacement split: the requested target requires {:g} nL at 0% replacement "
+            "or {:g} nL at 100% replacement. Every nonzero transfer must be at least {:g} nL "
+            "AND a multiple of {:g} nL. Adjust the final volume, site target, or stock concentration.".format(
+                droplets * transfer_increment_nl, droplets * concentration_ratio * transfer_increment_nl,
+                minimum_transfer_nl, transfer_increment_nl))
     return fractions
 
 
@@ -138,6 +158,10 @@ def parse_source1(path: Path, hinge_type: str = "original") -> Tuple[List[Dict[s
     records = _dict_rows(rows, header_index)
     if not records:
         raise ValueError("Base source contains no data rows.")
+    available_hinges = {row.get("Hinge Type", "") for row in records} - {""}
+    if available_hinges and hinge_type not in available_hinges:
+        raise ValueError("This base sheet does not contain the selected hinge type. Choose {}.".format(
+            ", ".join(HINGE_TYPES.get(key, key) for key in sorted(available_hinges))))
     columns = list(records[0])
     well_column = _find_column(columns, ("Well Position", "Well"))
     sequence_column = _find_column(
@@ -151,6 +175,10 @@ def parse_source1(path: Path, hinge_type: str = "original") -> Tuple[List[Dict[s
     by_replacement_key: Dict[str, Dict[str, str]] = {}
     key_order: List[str] = []
     for row in records:
+        # Inventory supplements are selected explicitly; their logical keys may
+        # also have an unmodified staple in the base mixture.
+        if row.get("Usage", "") == "Supplemental":
+            continue
         row_hinge_type = row.get("Hinge Type", "")
         if row_hinge_type and row_hinge_type not in HINGE_TYPES:
             raise ValueError("Unknown hinge type in base CSV: {}".format(row_hinge_type))
@@ -167,6 +195,7 @@ def parse_source1(path: Path, hinge_type: str = "original") -> Tuple[List[Dict[s
             "Well": well,
             "Replacement Well": replacement_key,
             "Sequence": row.get(sequence_column, ""),
+            "Hinge Type": row_hinge_type,
         }
     return [by_replacement_key[key] for key in key_order], _plate_name(rows, "SourcePlate1[1]")
 
@@ -236,6 +265,8 @@ def generate_picklist(
     hinge_type: str = "original",
     base_concentration_nm: float = 200000.0,
     base_desired_concentration_nm: float = 50.0,
+    minimum_transfer_nl: float = 25.0,
+    transfer_increment_nl: float = 25.0,
 ) -> List[Dict[str, object]]:
     """Apply replacements and build Echo-format transfer rows."""
     destinations = [_clean(well).upper() for well in destination_wells if _clean(well)]
@@ -246,6 +277,9 @@ def generate_picklist(
     if not math.isfinite(base_concentration_nm) or base_concentration_nm <= 0:
         raise ValueError("Base stock concentration must be a finite positive number.")
 
+    validate_transfer_limits(minimum_transfer_nl, transfer_increment_nl)
+    if not valid_transfer(transfer_volume_nl, minimum_transfer_nl, transfer_increment_nl):
+        raise ValueError("Base transfer violates the minimum transfer or increment.")
     base_rows, base_plate_name = parse_source1(Path(base_source_path), hinge_type)
     selected_replacements: List[Dict[str, object]] = []
     targets: Dict[str, Tuple[Path, str]] = {}
@@ -276,12 +310,11 @@ def generate_picklist(
                 raise ValueError("Replacement percentage must be between 0% and 100%: {}".format(row["Name"]))
             replacement_volume = total_volume * fraction * concentration_ratio
             original_volume = total_volume * (1 - fraction)
-            # Every requested target and split must fit whole Echo droplets.
-            if any(not math.isclose(volume / 25, round(volume / 25), rel_tol=0, abs_tol=1e-9)
+            if any(not valid_transfer(volume, minimum_transfer_nl, transfer_increment_nl)
                    for volume in (replacement_volume, original_volume)):
-                raise ValueError("Replacement target and percentage must produce transfers in 25 nL increments: {}. Increase the base transfer volume or adjust the target/percentage.".format(row["Name"]))
-            replacement_volume = round(replacement_volume / 25) * 25
-            original_volume = round(original_volume / 25) * 25
+                raise ValueError("Replacement target and percentage must produce transfers with minimum {:g} nL and {:g} nL increments: {}.".format(minimum_transfer_nl, transfer_increment_nl, row["Name"]))
+            replacement_volume = round(replacement_volume / transfer_increment_nl) * transfer_increment_nl
+            original_volume = round(original_volume / transfer_increment_nl) * transfer_increment_nl
             target = row["Replace Well"].upper()
             if target in targets:
                 prior_path, prior_name = targets[target]
@@ -300,6 +333,13 @@ def generate_picklist(
                 {
                     "Well": row["Well"],
                     "Sequence": row["Sequence"],
+                    "Sample Comments": (
+                        "Tab: {} | Panel: {} | Staple: {} | Sequence: {}".format(
+                            selection.replacement_tab,
+                            (selection.panel_names or {}).get(row["Name"], ""),
+                            row["Name"], row["Sequence"],
+                        ) if selection.replacement_tab else row["Sequence"]
+                    ),
                     "Source Plate Name": plate_name,
                     "Transfer Volume": replacement_volume,
                 }
@@ -307,6 +347,9 @@ def generate_picklist(
 
     active = [
         {"Well": row["Well"], "Sequence": row["Sequence"], "Source Plate Name": base_plate_name,
+         "Sample Comments": "Tab: Base | {}Sequence: {}".format(
+             "Hinge: {} | ".format("Flexible" if row["Hinge Type"] == "original" else "Rigid")
+             if row.get("Hinge Type") else "", row["Sequence"]),
          "Transfer Volume": retained_volumes.get(row.get("Replacement Well", row["Well"]).upper(), transfer_volume_nl)}
         for row in base_rows
         if retained_volumes.get(row.get("Replacement Well", row["Well"]).upper(), transfer_volume_nl) > 0
@@ -321,7 +364,7 @@ def generate_picklist(
                     "Source Plate Name": source["Source Plate Name"],
                     "Source Plate Type": source_plate_type,
                     "Source Well": source["Well"].upper(),
-                    "Sample Comments": source["Sequence"],
+                    "Sample Comments": source.get("Sample Comments", source["Sequence"]),
                     "Transfer Volume": source.get("Transfer Volume", transfer_volume_nl),
                 }
             )
@@ -363,25 +406,107 @@ def calculate_mixing_volumes(
     te_10x: Sequence[float],
     desired: Sequence[float],
 ) -> List[Dict[str, float]]:
-    """Calculate reagent volumes, with every reagent included in the water balance."""
-    try:
-        final_volume = desired[0]
-        staple_volume = (final_volume / (staple[0] / desired[1])) * number_of_staples
-        scaffold_volume = final_volume / (scaffold[0] / desired[2])
-        te_volume = (
-            final_volume - scaffold_volume * scaffold[1] - staple_volume * staple[1]
-        ) / (te_10x[1] / desired[3])
-        magnesium_volume = final_volume / (magnesium[2] / desired[4])
-        sodium_volume = final_volume / (sodium[3] / desired[5])
-    except (IndexError, ZeroDivisionError) as exc:
-        raise ValueError("Mixing concentrations and desired values must be non-zero where used.") from exc
-    water_volume = final_volume - sum(
-        (staple_volume, scaffold_volume, te_volume, magnesium_volume, sodium_volume)
-    )
-    values = [staple_volume, scaffold_volume, te_volume, magnesium_volume, sodium_volume, water_volume]
-    if any(value < -1e-9 for value in values):
-        raise ValueError("Mixing parameters produce a negative reagent volume.")
-    labels = ["Staple mix (from picklist)", "Scaffold", "10X TE", "Mg (100 mM)", "Na (100 mM)", "DI Water"]
+    """Balance DNA, TE, Mg and Na, rejecting infeasible final compositions.
+
+    Staple buffer composition applies to the entire collected staple pool.
+    DNA amounts are fixed first; nonnegative buffer additions are solved jointly.
+    """
+    def vector(values, length, label):
+        try:
+            result = [float(value) for value in values]
+        except (TypeError, ValueError) as exc:
+            raise ValueError("{} must contain numeric values.".format(label)) from exc
+        if len(result) != length or any(not math.isfinite(value) or value < 0 for value in result):
+            raise ValueError("{} must contain {} finite, nonnegative values.".format(label, length))
+        return result
+
+    staple = vector(staple, 4, "Staple stock")
+    scaffold = vector(scaffold, 4, "Scaffold stock")
+    magnesium = vector(magnesium, 4, "Mg stock")
+    sodium = vector(sodium, 4, "Na stock")
+    te_10x = vector(te_10x, 4, "TE stock")
+    desired = vector(desired, 6, "Desired recipe")
+    number_of_staples = vector([number_of_staples], 1, "Effective staple count")[0]
+    final_volume = desired[0]
+    if final_volume <= 0:
+        raise ValueError("Final mixing volume must be positive.")
+    for label, stock in (("TE", te_10x), ("Mg", magnesium), ("Na", sodium)):
+        if stock[0] != 0:
+            raise ValueError("{} buffer stock must have 0 nM DNA; supply DNA through staple/scaffold stocks.".format(label))
+
+    def dna_volume(target, stock, label):
+        if target == 0:
+            return 0.0
+        if stock <= 0:
+            raise ValueError("{} stock concentration must be positive for a nonzero target.".format(label))
+        return final_volume * (target / stock)
+
+    staple_volume = dna_volume(desired[1], staple[0], "Staple") * number_of_staples
+    scaffold_volume = dna_volume(desired[2], scaffold[0], "Scaffold")
+    volume_tolerance = 1e-9 * max(1.0, final_volume)
+    fixed_volume = staple_volume + scaffold_volume
+    if not math.isfinite(fixed_volume) or fixed_volume > final_volume + volume_tolerance:
+        raise ValueError("Staple mix and scaffold require {:g} µL, exceeding the requested {:g} µL.".format(fixed_volume, final_volume))
+
+    # Solve in units of final concentration, with unknown stock volume fractions.
+    stocks = (te_10x, magnesium, sodium)
+    matrix = [[stock[component] for stock in stocks] for component in (1, 2, 3)]
+    background = [staple_volume/final_volume * staple[c] + scaffold_volume/final_volume * scaffold[c]
+                  for c in (1, 2, 3)]
+    residual = []
+    for label, target, carried in zip(("TE", "Mg", "Na"), desired[3:], background):
+        if not math.isfinite(carried) or carried > target + 1e-9 * max(1.0, target):
+            raise ValueError("{} carried by staple/scaffold stocks ({:g}) already exceeds the final target ({:g}).".format(label, carried, target))
+        residual.append(max(0.0, target - carried))
+
+    # Row scaling keeps TE strengths and salt concentrations numerically comparable.
+    scales = [max([abs(value) for value in row] + [abs(target), 1e-300])
+              for row, target in zip(matrix, residual)]
+    normalized = [[value/scale for value in row] for row, scale in zip(matrix, scales)]
+    rhs = [value/scale for value, scale in zip(residual, scales)]
+
+    def solve_square(rows, columns):
+        size = len(columns)
+        augmented = [[normalized[row][column] for column in columns] + [rhs[row]] for row in rows]
+        for column in range(size):
+            pivot = max(range(column, size), key=lambda row: abs(augmented[row][column]))
+            if abs(augmented[pivot][column]) <= 1e-12:
+                return None
+            augmented[column], augmented[pivot] = augmented[pivot], augmented[column]
+            divisor = augmented[column][column]
+            augmented[column] = [value/divisor for value in augmented[column]]
+            for row in range(size):
+                if row != column:
+                    factor = augmented[row][column]
+                    augmented[row] = [x-factor*y for x,y in zip(augmented[row], augmented[column])]
+        return [row[-1] for row in augmented]
+
+    # Enumerate the small system's feasible vertices. This also supports redundant
+    # stocks or zero targets; minimum added volume leaves the most room for water.
+    candidates = []
+    for count in range(4):
+        for columns in combinations(range(3), count):
+            for rows in combinations(range(3), count):
+                solution = solve_square(rows, columns)
+                if solution is None or any(not math.isfinite(value) or value < -1e-10 for value in solution):
+                    continue
+                fractions = [0.0, 0.0, 0.0]
+                for column, value in zip(columns, solution):
+                    fractions[column] = max(0.0, value)
+                achieved = [sum(coefficient*fraction for coefficient,fraction in zip(row, fractions)) for row in matrix]
+                if all(math.isfinite(value) and math.isclose(value, target, rel_tol=1e-9, abs_tol=1e-9)
+                       for value, target in zip(achieved, residual)):
+                    candidates.append(fractions)
+    if not candidates:
+        raise ValueError("Cannot reach the requested TE, Mg and Na concentrations with nonnegative additions of these stocks. Check stock compositions and targets.")
+    additions = min(candidates, key=sum)
+    te_volume, magnesium_volume, sodium_volume = [fraction*final_volume for fraction in additions]
+    water_volume = final_volume - fixed_volume - sum((te_volume, magnesium_volume, sodium_volume))
+    if not math.isfinite(water_volume) or water_volume < -volume_tolerance:
+        raise ValueError("Mixing recipe requires {:g} µL of reagents but final volume is {:g} µL (negative water). Use more concentrated stocks or lower targets.".format(final_volume-water_volume, final_volume))
+    values = [staple_volume, scaffold_volume, te_volume, magnesium_volume, sodium_volume, max(0.0, water_volume)]
+    labels = ["Staple mix (from picklist)", "Scaffold", "{:g}X TE".format(te_10x[1]),
+              "Mg ({:g} mM)".format(magnesium[2]), "Na ({:g} mM)".format(sodium[3]), "DI Water"]
     return [{"Reagent": label, "Volume_uL": value} for label, value in zip(labels, values)]
 
 

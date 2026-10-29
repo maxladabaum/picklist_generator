@@ -1,1 +1,8 @@
-# The application uses only the Python standard library.
+# RGB image import and physical-aspect-ratio resampling.
+Pillow>=10
+
+# Additive Gaussian reconstruction in physical coordinates.
+numpy>=1.24
+
+# Ranked image-similarity graph exports.
+matplotlib>=3.7

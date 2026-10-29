@@ -26,10 +26,10 @@ class MixingPreviewTests(unittest.TestCase):
                         "base_path": str(base), "transfer_volume": str(transfer_volume),
                         "transfers_per_source": str(repeats), "destination_wells": "A01",
                         "source_plate_type": "384PP_AQ_BP", "destination_plate": "Destination",
-                        "max_volume": "12.5", "staple": "200000,1,0,0",
-                        "scaffold": "400,0.1,0,0", "magnesium": "0,0,100,0",
-                        "sodium": "0,0,0,100", "te_10x": "0,10,0,0",
-                        "desired": "100,{},10,1,12,5".format(base_target),
+                        "max_volume": "12.5", "staple": "200000,1,10,20",
+                        "scaffold": "400,0.1,3,4", "magnesium": "0,0.2,100,1",
+                        "sodium": "0,0.3,2,100", "te_10x": "0,10,1,2",
+                        "desired": "100,{},10,2,12,5".format(base_target),
                     }
                     app = SimpleNamespace(**{
                         name: Mock(get=Mock(return_value=value)) for name, value in fields.items()
@@ -71,7 +71,11 @@ class MixingPreviewTests(unittest.TestCase):
                                         "A02": 5 * (1 - fraction), "A03": base_target}[row["Source Well"]]
                         actual = stock * row["Transfer Volume"] * repeats / 1000 * aliquot_fraction / 100
                         self.assertAlmostEqual(actual, expected)
-                    self.assertAlmostEqual(volumes[2], (100 - 2.5 * 0.1 - volumes[0]) / 10)
+                    stocks = [[float(value) for value in fields[key].split(',')]
+                              for key in ('staple', 'scaffold', 'te_10x', 'magnesium', 'sodium')]
+                    for component, target in enumerate((2, 12, 5), start=1):
+                        actual = sum(volume * stock[component] for volume, stock in zip(volumes, stocks)) / 100
+                        self.assertAlmostEqual(actual, target)
                     self.assertAlmostEqual(sum(volumes), 100)
                     for invalid_target in ("", "0", "nan", "not a number"):
                         app.set_views[0].desired_concentration_nm.get.return_value = invalid_target

@@ -66,14 +66,32 @@ def unused_wells_from(state: Dict, plate_name: str, start_well: str, count: int)
     return result
 
 
-def clear_plate(state: Dict, plate_name: str) -> bool:
-    """Remove all recorded usage for one named destination plate."""
+def occupied_destination_wells(state: Dict, plate_name: str, storage_items=(), ignore_ids=()):
+    """Usage and reservations belonging to the current physical plate."""
+    used = set(state.get("plates", {}).get(plate_name, {}).get("wells", {}))
+    released = set(state.get("released_storage_reservations", {}).get(plate_name, []))
+    ignored = set(ignore_ids) | released
+    for item in storage_items:
+        if item.get("destination_plate_name") == plate_name and item.get("id") not in ignored:
+            used.update(item.get("destination_wells", []))
+    return used
+
+
+def clear_plate(state: Dict, plate_name: str, storage_items=()) -> bool:
+    """Start a fresh plate, retaining stored runs but releasing old reservations."""
     plates = state.setdefault("plates", {})
-    if plate_name in plates:
-        del plates[plate_name]
+    changed = plate_name in plates
+    plates.pop(plate_name, None)
+    reservations = {item["id"] for item in storage_items
+                    if item.get("destination_plate_name") == plate_name and item.get("id")}
+    if reservations:
+        released = state.setdefault("released_storage_reservations", {})
+        previous = set(released.get(plate_name, []))
+        changed = changed or bool(reservations - previous)
+        released[plate_name] = sorted(previous | reservations)
+    if changed:
         state["updated_utc"] = datetime.now(timezone.utc).isoformat()
-        return True
-    return False
+    return changed
 
 
 def edit_destination_well(state: Dict, plate_name: str, well: str, label: str, used: bool) -> None:

@@ -12,7 +12,7 @@
   "save_picklist_path": "generated_output/picklist_combined.csv",
   "save_recipe_path": "generated_output/mixing_recipe.csv",
   "source_plate_type": "384PP_AQ_BP",
-  "transfer_volume_nL": 50,
+  "transfer_volume_nL": 25,
   "transfers_per_source": 1,
   "version": 1
 }

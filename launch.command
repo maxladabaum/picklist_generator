@@ -23,4 +23,8 @@ if ! .venv/bin/python -c "import tkinter" >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! .venv/bin/python -c "from PIL import Image; import numpy; import matplotlib" >/dev/null 2>&1; then
+  .venv/bin/python -m pip install -r requirements.txt
+fi
+
 exec .venv/bin/python picklist_app.py

@@ -127,17 +127,20 @@ class PicklistCoreTests(unittest.TestCase):
     def test_mirna_panels_infer_all_anchor_positions(self):
         records, _ = parse_source2(SHEETS / "miRNA_replace.csv")
         panels = mirna_panels()
-        self.assertEqual(len(records), 12)
-        self.assertEqual([len(panel["active"]) for panel in panels], [6, 6])
+        self.assertEqual(len(records), 48)
+        legacy_panels = panels[-2:]
+        self.assertEqual([len(panel["active"]) for panel in legacy_panels], [6, 6])
         self.assertTrue(all(len(panel["rows"]) == 8 and len(panel["columns"]) == 12 for panel in panels))
         names = {panel_sequence_name(panel, row, column)
-                 for panel in panels for row, column in panel["active"]}
-        self.assertEqual(names, {record["Name"] for record in records})
-        for panel, prefix, column in ((panels[0], "Lock-3'Ach1_p1", 3), (panels[1], "Dir-5'Anch1_p2", 1)):
-            for row_index, helix in enumerate(range(3, 14, 2), start=1):
+                 for panel in legacy_panels for row, column in panel["active"]}
+        self.assertEqual(names, {record["Name"] for record in records if record["Well"].startswith("B")})
+        for panel, prefix, column, offset, display_column in (
+                (legacy_panels[0], "Lock-3'Ach1_p1", 4, 1, 10),
+                (legacy_panels[1], "Dir-5'Anch1_p2", 3, 0, 0)):
+            for row_index, helix in enumerate(range(3, 14, 2), start=offset):
                 name = "{}_H{}-{}".format(prefix, helix, column)
-                self.assertEqual(panel_template_positions(panel, {name}), [(row_index, column - 1)])
-        self.assertIn(("miRNA", "miRNA_replace.csv", "SourcePlate3[3]", panels), panel_definitions())
+                self.assertEqual(panel_template_positions(panel, {name}), [(row_index, display_column)])
+        self.assertIn(("miRNA", "miRNA_replace.csv", "SourcePlate10[10]", panels), panel_definitions())
 
     def test_mirna_preserves_source_wells_and_replaces_csv_targets(self):
         records, _ = parse_source2(SHEETS / "miRNA_replace.csv")
@@ -146,23 +149,23 @@ class PicklistCoreTests(unittest.TestCase):
             with self.subTest(name=record["Name"]):
                 rows = generate_picklist(
                     SHEETS / "book_base.csv",
-                    [ReplacementSelection(SHEETS / "miRNA_replace.csv", [record["Name"]], "SourcePlate3[3]", desired_concentration_nm=250)],
+                    [ReplacementSelection(SHEETS / "miRNA_replace.csv", [record["Name"]], "SourcePlate10[10]", desired_concentration_nm=250)],
                     ["A01", "A02"], transfer_volume_nl=25,
                 )
-                self.assertEqual(len(rows), len(base))
-                replaced_well = next(row["Well"] for row in base if row["Replacement Well"] == record["Replace Well"])
-                self.assertFalse(any(row["Source Plate Name"] == base_plate and row["Source Well"] == replaced_well for row in rows))
-                anchor = [row for row in rows if row["Source Plate Name"] == "SourcePlate3[3]"]
+                replaced_wells = {row["Well"] for row in base if row["Replacement Well"] == record["Replace Well"]}
+                self.assertEqual(len(rows), len(base) + (0 if replaced_wells else 1))
+                self.assertFalse(any(row["Source Plate Name"] == base_plate and row["Source Well"] in replaced_wells for row in rows))
+                anchor = [row for row in rows if row["Source Plate Name"] == "SourcePlate10[10]"]
                 self.assertEqual(len(anchor), 1)
                 self.assertEqual(anchor[0]["Source Well"], record["Well"])
                 self.assertEqual(anchor[0]["Sample Comments"], record["Sequence"])
                 self.assertEqual(anchor[0]["Transfer Volume"], 125)
 
-    def test_mirna_shared_m13_target_is_a_clash(self):
-        with self.assertRaisesRegex(ValueError, "Duplicate replacement for M13"):
+    def test_mirna_plain_and_combined_lock_target_is_a_clash(self):
+        with self.assertRaisesRegex(ValueError, "Duplicate replacement for P13"):
             generate_picklist(
                 SHEETS / "book_base.csv",
-                [ReplacementSelection(SHEETS / "miRNA_replace.csv", ["Lock-3'Ach1_p1_H3-3", "Dir-5'Anch1_p2_H3-1"], "SourcePlate3[3]")],
+                [ReplacementSelection(SHEETS / "miRNA_replace.csv", ["Dir-5'Anch1_p2_H7-3_ST20[265]5[475]", "[R1]Dir-5'Anch1_p2_H7-3_ST20[265]5[475]"], "SourcePlate10[10]")],
                 ["A01", "A02"],
             )
 
