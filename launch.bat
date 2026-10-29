@@ -16,9 +16,9 @@ if not defined PYTHON_CMD (
   exit /b 1
 )
 
-%PYTHON_CMD% -c "import sys; raise SystemExit(sys.version_info ^< (3, 9))" >nul 2>nul
+%PYTHON_CMD% -c "import sys; raise SystemExit(sys.version_info < (3, 9))"
 if errorlevel 1 (
-  echo Python 3.9 or newer is required.
+  echo Could not run %PYTHON_CMD% with Python 3.9 or newer. See the error above for details.
   pause
   exit /b 1
 )
